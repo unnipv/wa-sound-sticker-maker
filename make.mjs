@@ -113,14 +113,15 @@ async function makeWebp(src, start, isVideo, dir) {
     }
     throw new Error('Could not get the sticker under 500 KB.');
   }
-  const ladder = [[15, 70], [12, 55], [10, 45], [8, 35], [6, 25]];
+  const ladder = [[15, 70], [15, 55], [12, 50], [10, 45], [10, 35], [8, 35], [8, 25], [6, 30], [6, 20], [5, 15]];
   for (const [fps, q] of ladder) {
     await ffmpeg([
       '-ss', String(start), '-t', String(MAX_ANIM), '-i', src, '-vf', `fps=${fps},${scale}`, '-an',
-      '-c:v', 'libwebp_anim', '-lossless', '0', '-q:v', String(q), '-compression_level', '6', '-loop', '0', out,
+      '-c:v', 'libwebp_anim', '-lossless', '0', '-q:v', String(q), '-compression_level', '4', '-loop', '0', out,
     ]);
     const buf = await readFile(out);
     if (buf.length <= MAX_BYTES) return buf;
+    console.log(`  ${(buf.length / 1024).toFixed(0)} KB at ${fps}fps is too big, shrinking...`);
   }
   throw new Error('Could not get the sticker under 500 KB. Try a shorter clip (--start) or smaller source.');
 }
@@ -196,6 +197,7 @@ async function main() {
   const isVideo = VIDEO_EXT.has(extname(opts.media).toLowerCase());
   const dir = await mkdtemp(join(tmpdir(), 'wass-'));
   try {
+    console.log('Building sticker...');
     const audio = await makeAudio(opts.audio ?? opts.media, opts.audio ? 0 : opts.start, dir);
     const webp = await withExif(await makeWebp(opts.media, opts.start, isVideo, dir), audio.sha256);
     await writeFile(new URL('./last-sticker.webp', import.meta.url), webp);
@@ -204,6 +206,7 @@ async function main() {
     if (opts.dry) return;
 
     patchStickerProto();
+    console.log('Connecting to WhatsApp...');
     const sock = await connect();
     const jid = opts.to ? `${opts.to}@s.whatsapp.net` : jidNormalizedUser(sock.user.id);
     const upload = sock.waUploadToServer;
