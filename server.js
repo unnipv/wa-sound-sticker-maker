@@ -146,6 +146,8 @@ app.post('/api/yt/info', requirePasscode, async (req, res) => {
       duration: info.duration,
       thumbnail: info.thumbnail,
       uploader: info.uploader,
+      width: info.width ?? null,
+      height: info.height ?? null,
     });
   } catch (err) {
     const code = err.code || 'video_unavailable';
@@ -173,6 +175,14 @@ app.post(
     const duration = Math.min(MAX_ANIM_SEC, Math.max(1, Number(req.body?.duration) || MAX_ANIM_SEC));
     const mute = ['1', 'true', 'yes', 'on'].includes(String(req.body?.mute || '').toLowerCase());
     const audioVolume = Math.min(3, Math.max(0.05, Number(req.body?.audioVolume) || 1));
+    const fitRaw = String(req.body?.fit ?? '').trim().toLowerCase();
+    if (fitRaw && fitRaw !== 'fit' && fitRaw !== 'fill') {
+      for (const f of [audio, req.files?.media?.[0]]) {
+        if (f?.path) rm(f.path, { force: true }).catch(() => {});
+      }
+      return res.status(400).json({ ok: false, error: 'Framing must be "fit" or "fill".', errorCode: 'invalid_fit' });
+    }
+    const fit = fitRaw === 'fill' ? 'fill' : 'fit';
 
     if (source === 'youtube') {
       const cleanupAudio = () => {
@@ -202,6 +212,7 @@ app.post(
         duration,
         mute,
         audioVolume,
+        fit,
       });
       return res.status(202).json({ ok: true, id: job.id, status: job.status });
     }
@@ -221,6 +232,7 @@ app.post(
       duration,
       mute,
       audioVolume,
+      fit,
     });
     res.status(202).json({ ok: true, id: job.id, status: job.status });
   },

@@ -7,6 +7,8 @@ const state = {
   mediaIsVideo: false,
   mediaDuration: 0,
   mediaObjectUrl: null,
+  mediaDims: null, // { w, h } once the browser knows them
+  fit: localStorage.getItem('wa_fit') === 'fill' ? 'fill' : 'fit',
   audioFile: null,
   soundMode: 'video', // video | upload | mute
   deliveryMode: 'relay', // relay | self
@@ -23,8 +25,113 @@ const state = {
   },
 };
 
+let stepsQueued = false;
 function show(el, visible) {
   el.classList.toggle('hidden', !visible);
+  if (!stepsQueued) {
+    stepsQueued = true;
+    queueMicrotask(() => {
+      stepsQueued = false;
+      updateSteps();
+    });
+  }
+}
+
+const isShown = (id) => !$(id).classList.contains('hidden');
+
+// Source → Look → Send spine, derived from what is on screen.
+function updateSteps() {
+  let current = 1;
+  if (isShown('result-card')) current = 3;
+  else if (
+    isShown('progress-card') ||
+    (state.sourceTab === 'upload' && isShown('tune-panel')) ||
+    (state.sourceTab === 'youtube' && isShown('yt-loaded'))
+  ) current = 2;
+  document.querySelectorAll('#steps .step').forEach((li) => {
+    const n = Number(li.dataset.step);
+    li.classList.toggle('done', n < current);
+    li.classList.toggle('current', n === current);
+    if (n === current) li.setAttribute('aria-current', 'step');
+    else li.removeAttribute('aria-current');
+  });
+  // YouTube empty state: only before a video is loaded (doesn't go through show() to avoid a loop)
+  $('yt-empty').classList.toggle('hidden', isShown('yt-loaded'));
+}
+
+function setPressed(selector, attr, value) {
+  document.querySelectorAll(selector).forEach((btn) => {
+    const on = btn.dataset[attr] === value;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+// Filled track for range sliders (WebKit has no ::-moz-range-progress equivalent)
+function paintRange(el) {
+  const min = Number(el.min) || 0;
+  const max = Number(el.max) || 0;
+  const pct = max > min ? ((Number(el.value) - min) / (max - min)) * 100 : 0;
+  el.style.setProperty('--pct', `${Math.max(0, Math.min(100, pct))}%`);
+}
+function paintAllRanges() {
+  document.querySelectorAll('input[type="range"]').forEach(paintRange);
+}
+document.addEventListener('input', (e) => {
+  if (e.target instanceof HTMLInputElement && e.target.type === 'range') paintRange(e.target);
+});
+
+// Turn raw server/ffmpeg errors into something a person can act on.
+function friendlyError(err) {
+  const msg = String(err?.message || '').trim();
+  if (err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg)) {
+    return "Couldn't reach the server. Check your connection and try again.";
+  }
+  if (/^ffmpeg failed/i.test(msg)) {
+    return "We couldn't decode that file. It may be damaged or in an unusual format — try exporting it as MP4 or PNG and upload again.";
+  }
+  if (!msg) return 'Something went wrong while building the sticker. Please try again.';
+  return /[.!?]$/.test(msg) ? msg : `${msg}.`;
+}
+
+// Fit / Fill framing (shared by both tabs, remembered)
+const FAR_FROM_SQUARE = (w, h) => {
+  if (!(w > 0 && h > 0)) return false;
+  const r = w / h;
+  return r > 1.35 || r < 0.74;
+};
+
+function setFit(mode) {
+  state.fit = mode === 'fill' ? 'fill' : 'fit';
+  localStorage.setItem('wa_fit', state.fit);
+  setPressed('[data-fit]', 'fit', state.fit);
+  setPressed('[data-yt-fit]', 'ytFit', state.fit);
+}
+
+function updateFitHints() {
+  const d = state.mediaDims;
+  show($('fit-hint'), Boolean(d && FAR_FROM_SQUARE(d.w, d.h)));
+  const info = state.yt.info;
+  show($('yt-fit-hint'), Boolean(info && FAR_FROM_SQUARE(info.width, info.height)));
+}
+
+document.querySelectorAll('[data-fit]').forEach((btn) => {
+  btn.addEventListener('click', () => setFit(btn.dataset.fit));
+});
+document.querySelectorAll('[data-yt-fit]').forEach((btn) => {
+  btn.addEventListener('click', () => setFit(btn.dataset.ytFit));
+});
+
+// Progress: Upload/Fetch → Encode → Ready
+function setProgressStage(stage, firstLabel) {
+  if (firstLabel) $('stage-fetch-label').textContent = firstLabel;
+  const order = ['fetch', 'encode', 'done'];
+  const idx = order.indexOf(stage);
+  document.querySelectorAll('#stage-track li').forEach((li) => {
+    const i = order.indexOf(li.dataset.stage);
+    li.classList.toggle('done', i < idx);
+    li.classList.toggle('current', i === idx);
+  });
 }
 
 function setError(el, msg) {
@@ -159,6 +266,8 @@ function handleMediaFile(file) {
   state.mediaFile = file;
   state.mediaObjectUrl = URL.createObjectURL(file);
   state.mediaDuration = 0;
+  state.mediaDims = null;
+  updateFitHints();
   setError($('build-error'), '');
 
   const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i.test(file.name);
@@ -180,6 +289,8 @@ function handleMediaFile(file) {
     vid.onloadedmetadata = () => {
       const dur = Number.isFinite(vid.duration) ? vid.duration : 0;
       state.mediaDuration = dur;
+      state.mediaDims = { w: vid.videoWidth, h: vid.videoHeight };
+      updateFitHints();
       updateStartSliderBounds();
     };
     setSoundMode('video');
@@ -188,6 +299,10 @@ function handleMediaFile(file) {
     vid.removeAttribute('src');
     show($('video-controls'), false);
     show(img, true);
+    img.onload = () => {
+      state.mediaDims = { w: img.naturalWidth, h: img.naturalHeight };
+      updateFitHints();
+    };
     img.src = state.mediaObjectUrl;
     // Images/GIFs have no audio track — default to upload audio so user gets a hint right away
     setSoundMode('upload');
@@ -201,6 +316,7 @@ function updateStartSliderBounds() {
   slider.max = String(maxStart);
   if (Number(slider.value) > maxStart) slider.value = String(maxStart);
   $('start-val').textContent = `${Number(slider.value).toFixed(1)}s`;
+  paintAllRanges();
 }
 
 $('start-slider').addEventListener('input', () => {
@@ -226,9 +342,7 @@ $('volume-slider').addEventListener('input', () => {
 // Sound mode segmented control
 function setSoundMode(mode) {
   state.soundMode = mode;
-  document.querySelectorAll('[data-sound]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.sound === mode);
-  });
+  setPressed('[data-sound]', 'sound', mode);
   show($('audio-upload-box'), mode === 'upload');
   show($('volume-box'), mode !== 'mute');
 }
@@ -261,15 +375,18 @@ $('build-btn').addEventListener('click', async () => {
   fd.append('duration', $('duration-slider').value || '6');
   fd.append('mute', state.soundMode === 'mute' ? 'true' : 'false');
   fd.append('audioVolume', $('volume-slider').value || '1');
+  fd.append('fit', state.fit);
 
   show($('editor-card'), false);
   show($('result-card'), false);
   show($('progress-card'), true);
+  setProgressStage('fetch', 'Upload');
   $('progress-title').textContent = 'Uploading…';
-  $('progress-sub').textContent = '512×512 animated WebP (≤500 KB) + Opus audio';
+  $('progress-sub').textContent = `${state.mediaFile.name} · ${(state.mediaFile.size / (1024 * 1024)).toFixed(1)} MB`;
 
   try {
     const created = await api('/api/jobs', { method: 'POST', body: fd });
+    setProgressStage('encode');
     $('progress-title').textContent = 'Encoding sticker…';
     const job = await pollJob(created.id);
     state.currentJob = job;
@@ -281,7 +398,7 @@ $('build-btn').addEventListener('click', async () => {
       setError($('build-error'), 'This file has no audio track. Switch to "Upload audio" to add a sound, or "No sound" for a silent sticker.');
       setSoundMode('upload');
     } else {
-      setError($('build-error'), err.message);
+      setError($('build-error'), friendlyError(err));
     }
   }
 });
@@ -386,9 +503,7 @@ function setYtStart(sec, { updateInput = true, immediateEmbed = false } = {}) {
 
 function setYtSoundMode(mode) {
   state.yt.soundMode = mode;
-  document.querySelectorAll('[data-yt-sound]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.ytSound === mode);
-  });
+  setPressed('[data-yt-sound]', 'ytSound', mode);
   show($('yt-audio-upload-box'), mode === 'upload');
   show($('yt-volume-box'), mode !== 'mute');
 }
@@ -478,12 +593,15 @@ $('yt-fetch-form').addEventListener('submit', async (e) => {
 
     show($('yt-loaded'), true);
     show($('result-card'), false);
+    updateFitHints();
+    paintAllRanges();
     setYtStart(0, { updateInput: true, immediateEmbed: true });
     setYtSoundMode('video');
   } catch (err) {
     show($('yt-loaded'), false);
     state.yt.info = null;
-    setError($('yt-error'), err.message);
+    updateFitHints();
+    setError($('yt-error'), friendlyError(err));
   } finally {
     btn.textContent = 'Fetch';
     renderYouTubeAvailability();
@@ -516,6 +634,7 @@ $('yt-build-btn').addEventListener('click', async () => {
   fd.append('duration', String(duration));
   fd.append('mute', state.yt.soundMode === 'mute' ? 'true' : 'false');
   fd.append('audioVolume', $('yt-volume-slider').value || '1');
+  fd.append('fit', state.fit);
   if (state.yt.soundMode === 'upload' && state.yt.audioFile) {
     fd.append('audio', state.yt.audioFile);
   }
@@ -523,6 +642,7 @@ $('yt-build-btn').addEventListener('click', async () => {
   show($('editor-card'), false);
   show($('result-card'), false);
   show($('progress-card'), true);
+  setProgressStage('fetch', 'Fetch');
   $('progress-title').textContent = `Fetching clip… (${rangeLabel})`;
   $('progress-sub').textContent = state.yt.info.title || 'Downloading trimmed section from YouTube';
 
@@ -538,7 +658,7 @@ $('yt-build-btn').addEventListener('click', async () => {
       setError($('yt-build-error'), 'This clip has no audio track. Switch to "Upload audio" to add a sound, or "No sound" for a silent sticker.');
       setYtSoundMode('upload');
     } else {
-      setError($('yt-build-error'), err.message);
+      setError($('yt-build-error'), friendlyError(err));
     }
   }
 });
@@ -557,11 +677,13 @@ async function pollJob(id, ctx = {}) {
       $('progress-sub').textContent = 'Waiting for an available worker';
     } else if (job.stage === 'fetching') {
       const range = ctx.rangeLabel ? ` (${ctx.rangeLabel})` : '';
+      setProgressStage('fetch');
       $('progress-title').textContent = `Fetching clip…${range}`;
       $('progress-sub').textContent = ctx.videoTitle || job.videoTitle || 'Downloading trimmed section from YouTube';
     } else {
+      setProgressStage('encode');
       $('progress-title').textContent = 'Encoding sticker…';
-      $('progress-sub').textContent = '512×512 animated WebP (≤500 KB) + Opus audio';
+      $('progress-sub').textContent = `512×512 animated WebP, ${job.fit === 'fill' ? 'filled' : 'fitted'} · squeezing it under 500 KB`;
     }
     await new Promise((r) => setTimeout(r, 600));
   }
@@ -587,28 +709,43 @@ function renderResult(job) {
   $('sticker-img').src = `${job.stickerUrl}${bust}`;
 
   const kb = (job.sizes.stickerBytes / 1024).toFixed(0);
-  $('meta-size').textContent = `Sticker: ${kb} KB / 500 KB`;
+  $('meta-size').textContent = `${kb} KB`;
+  show($('meta-crop'), job.fit === 'fill');
 
   const audioEl = $('sticker-audio');
   if (job.hasAudio && job.audioUrl) {
     audioEl.src = `${job.audioUrl}${bust}`;
-    $('meta-audio').textContent = `Audio: ${job.audioSeconds}s (${(job.sizes.audioBytes / 1024).toFixed(0)} KB)`;
+    $('meta-audio').textContent = `${job.audioSeconds}s`;
     show($('play-audio-btn'), true);
-    show($('sticker-sound-badge'), true);
   } else {
     audioEl.removeAttribute('src');
-    $('meta-audio').textContent = 'Silent sticker';
+    $('meta-audio').textContent = 'Silent';
     show($('play-audio-btn'), false);
-    show($('sticker-sound-badge'), false);
   }
+  audioEl.pause();
+  setPlayButton(false);
+}
+
+function setPlayButton(playing) {
+  const btn = $('play-audio-btn');
+  btn.textContent = playing ? '■ Stop' : '▶ Play sound';
+  btn.setAttribute('aria-pressed', String(playing));
 }
 
 function playStickerAudio() {
   const audioEl = $('sticker-audio');
   if (!audioEl.src) return;
+  if (!audioEl.paused) {
+    audioEl.pause();
+    return;
+  }
   audioEl.currentTime = 0;
-  audioEl.play().catch(() => {});
+  audioEl.play().catch(() => setPlayButton(false));
 }
+
+$('sticker-audio').addEventListener('play', () => setPlayButton(true));
+$('sticker-audio').addEventListener('pause', () => setPlayButton(false));
+$('sticker-audio').addEventListener('ended', () => setPlayButton(false));
 
 $('sticker-stage').addEventListener('click', playStickerAudio);
 $('play-audio-btn').addEventListener('click', playStickerAudio);
@@ -621,9 +758,7 @@ $('tweak-btn').addEventListener('click', () => {
 // Delivery mode toggle
 function setDeliveryMode(mode) {
   state.deliveryMode = mode;
-  document.querySelectorAll('[data-mode]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.mode === mode);
-  });
+  setPressed('[data-mode]', 'mode', mode);
   show($('relay-panel'), mode === 'relay');
   show($('self-panel'), mode === 'self');
   setError($('send-error'), '');
@@ -665,10 +800,10 @@ async function sendCurrentSticker(mode) {
       body: JSON.stringify(body),
     });
     const dest = mode === 'self' ? 'your "Message yourself" chat' : `+${res.sentTo}`;
-    $('send-success').textContent = `Sent to ${dest}! Open WhatsApp on your phone and long-press to favourite.`;
+    $('send-success').textContent = `Sent to ${dest}. Next, on your phone: open that chat in WhatsApp, long-press the sticker and tap Add to favourites.`;
     show($('send-success'), true);
   } catch (err) {
-    setError($('send-error'), err.message);
+    setError($('send-error'), friendlyError(err));
   } finally {
     btn.textContent = origText;
     renderConnectionStatus();
@@ -780,4 +915,7 @@ $('self-logout-btn').addEventListener('click', async () => {
   await refreshStatus();
 });
 
+setFit(state.fit);
+paintAllRanges();
+updateSteps();
 refreshStatus();

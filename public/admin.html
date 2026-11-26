@@ -16,7 +16,7 @@
           <p class="subtitle">Server-owned WhatsApp account (send-only)</p>
         </div>
       </div>
-      <div id="relay-pill" class="pill pill-muted">Loading…</div>
+      <div id="relay-pill" class="pill pill-muted" role="status" aria-live="polite">Loading…</div>
     </header>
 
     <section class="card stack">
@@ -35,18 +35,18 @@
           <button id="code-toggle-btn" type="button" class="btn btn-secondary">Link with 8-digit code</button>
         </div>
         <div id="code-form" class="inline-form hidden">
-          <input id="phone-input" type="tel" placeholder="Relay phone with country code" />
+          <input id="phone-input" type="tel" inputmode="tel" placeholder="Relay phone with country code" aria-label="Relay phone number with country code" />
           <button id="code-btn" type="button" class="btn btn-primary">Get code</button>
         </div>
       </div>
 
-      <div id="pair-output" class="pair-box hidden">
+      <div id="pair-output" class="pair-box hidden" aria-live="polite">
         <img id="qr-img" alt="Relay QR code" class="hidden" />
         <div id="code-display" class="pair-code hidden"></div>
         <p id="hint" class="muted small"></p>
       </div>
 
-      <p id="err" class="error hidden"></p>
+      <p id="err" class="error hidden" role="alert"></p>
     </section>
   </main>
 
