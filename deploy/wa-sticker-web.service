@@ -1,0 +1,20 @@
+[Unit]
+Description=wa-sticker-web — WhatsApp sound sticker studio (app + cloudflare quick tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cosmopense/Projects/wa-sticker-web
+ExecStart=/home/cosmopense/Projects/wa-sticker-web/deploy/run.sh
+Environment=PORT=8080
+Environment=PATH=/home/cosmopense/.local/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+StandardOutput=append:/home/cosmopense/Projects/wa-sticker-web/.run/service.log
+StandardError=append:/home/cosmopense/Projects/wa-sticker-web/.run/service.log
+
+[Install]
+WantedBy=default.target

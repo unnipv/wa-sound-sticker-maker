@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Relay Admin — Sound Sticker Studio</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-badge">🛠️</span>
+        <div>
+          <h1>Relay Admin</h1>
+          <p class="subtitle">Server-owned WhatsApp account (send-only)</p>
+        </div>
+      </div>
+      <div id="relay-pill" class="pill pill-muted">Loading…</div>
+    </header>
+
+    <section class="card stack">
+      <p class="muted small">
+        Pair a spare WhatsApp number here. Credentials are stored fresh in <code>data/relay/</code> and this socket only sends stickers (no auto-replies, no read receipts).
+      </p>
+
+      <div id="paired-box" class="paired-banner hidden">
+        <span>✅ Relay linked as <strong id="relay-me"></strong></span>
+        <button id="logout-btn" type="button" class="btn-link">Unlink</button>
+      </div>
+
+      <div id="unpaired-box" class="stack">
+        <div class="pair-actions">
+          <button id="qr-btn" type="button" class="btn btn-primary">Link with QR</button>
+          <button id="code-toggle-btn" type="button" class="btn btn-secondary">Link with 8-digit code</button>
+        </div>
+        <div id="code-form" class="inline-form hidden">
+          <input id="phone-input" type="tel" placeholder="Relay phone with country code" />
+          <button id="code-btn" type="button" class="btn btn-primary">Get code</button>
+        </div>
+      </div>
+
+      <div id="pair-output" class="pair-box hidden">
+        <img id="qr-img" alt="Relay QR code" class="hidden" />
+        <div id="code-display" class="pair-code hidden"></div>
+        <p id="hint" class="muted small"></p>
+      </div>
+
+      <p id="err" class="error hidden"></p>
+    </section>
+  </main>
+
+  <script type="module">
+    const token = new URLSearchParams(location.search).get('token') || '';
+    const $ = (id) => document.getElementById(id);
+    const show = (el, v) => el.classList.toggle('hidden', !v);
+
+    async function api(url, opts = {}) {
+      const res = await fetch(url, {
+        ...opts,
+        headers: { ...(opts.headers || {}), 'x-admin-token': token },
+      });
+      const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+      if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function render(st) {
+      const pill = $('relay-pill');
+      pill.textContent = st.paired ? 'Paired' : st.connection || 'Disconnected';
+      pill.className = st.paired ? 'pill pill-ok' : 'pill pill-muted';
+
+      show($('paired-box'), Boolean(st.paired));
+      show($('unpaired-box'), !st.paired);
+      if (st.paired) {
+        $('relay-me').textContent = st.me?.phone ? `+${st.me.phone}` : 'linked account';
+        show($('pair-output'), false);
+      } else if (st.qr) {
+        show($('pair-output'), true);
+        $('qr-img').src = st.qr;
+        show($('qr-img'), true);
+        show($('code-display'), false);
+        $('hint').textContent = 'Scan in WhatsApp → Linked devices → Link a device';
+      } else if (st.code) {
+        show($('pair-output'), true);
+        $('code-display').textContent = st.code;
+        show($('code-display'), true);
+        show($('qr-img'), false);
+        $('hint').textContent = 'Enter this code in WhatsApp → Linked devices → Link with phone number';
+      }
+      if (st.lastError && !st.paired) {
+        $('err').textContent = st.lastError;
+        show($('err'), true);
+      } else {
+        show($('err'), false);
+      }
+    }
+
+    async function poll() {
+      try {
+        render(await api('/api/relay/pair/status'));
+      } catch (e) {
+        $('err').textContent = e.message;
+        show($('err'), true);
+      }
+    }
+
+    $('qr-btn').onclick = async () => {
+      try {
+        render(await api('/api/relay/pair/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+      } catch (e) { $('err').textContent = e.message; show($('err'), true); }
+    };
+    $('code-toggle-btn').onclick = () => show($('code-form'), true);
+    $('code-btn').onclick = async () => {
+      try {
+        const phone = $('phone-input').value.trim();
+        render(await api('/api/relay/pair/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }) }));
+      } catch (e) { $('err').textContent = e.message; show($('err'), true); }
+    };
+    $('logout-btn').onclick = async () => {
+      try { render(await api('/api/relay/logout', { method: 'POST' })); }
+      catch (e) { $('err').textContent = e.message; show($('err'), true); }
+    };
+
+    poll();
+    setInterval(poll, 2500);
+  </script>
+</body>
+</html>

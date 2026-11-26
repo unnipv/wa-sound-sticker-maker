@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1116" />
+  <title>Sound Sticker Studio</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-badge" aria-hidden="true">🔊</span>
+        <div>
+          <h1>Sound Sticker Studio</h1>
+          <p class="subtitle">Video, GIF, or image → WhatsApp sound sticker</p>
+        </div>
+      </div>
+      <div id="status-pill" class="pill pill-muted">Checking…</div>
+    </header>
+
+    <!-- Passcode Gate -->
+    <section id="passcode-card" class="card hidden">
+      <h2>Enter passcode</h2>
+      <p class="muted">This studio is private for friends.</p>
+      <form id="passcode-form" class="stack">
+        <input id="passcode-input" type="password" inputmode="text" autocomplete="current-password" placeholder="Passcode" required />
+        <button type="submit" class="btn btn-primary">Unlock</button>
+      </form>
+      <p id="passcode-error" class="error hidden"></p>
+    </section>
+
+    <!-- Main Studio -->
+    <div id="studio" class="stack hidden">
+      <!-- Step 1: Upload & Tune -->
+      <section id="editor-card" class="card stack">
+        <div class="segmented source-tabs" role="tablist" aria-label="Input source">
+          <button type="button" class="seg-btn active" role="tab" aria-selected="true" data-source-tab="upload">Upload a file</button>
+          <button type="button" class="seg-btn" role="tab" aria-selected="false" data-source-tab="youtube">YouTube link</button>
+        </div>
+
+        <!-- Tab 1: Upload a file (unchanged) -->
+        <div id="upload-tab-panel" class="stack">
+          <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Upload video, GIF, or image">
+            <input id="media-input" type="file" accept="video/*,image/*" hidden />
+            <div class="dropzone-icon">🎬</div>
+            <div class="dropzone-title">Tap or drop a video, GIF, or photo</div>
+            <div class="dropzone-hint">MP4, MOV, WebM, GIF, PNG, JPG · up to <span id="max-mb">100</span> MB</div>
+          </div>
+
+          <div id="tune-panel" class="stack hidden">
+            <div class="media-stage">
+              <video id="video-preview" playsinline muted loop controls class="hidden"></video>
+              <img id="image-preview" alt="Selected media preview" class="hidden" />
+            </div>
+
+            <div class="file-row">
+              <span id="file-name" class="file-name"></span>
+              <button id="change-media-btn" type="button" class="btn-link">Change file</button>
+            </div>
+
+            <div id="video-controls" class="stack hidden">
+              <div class="control">
+                <div class="control-head">
+                  <label for="start-slider">Start time</label>
+                  <span id="start-val" class="mono">0.0s</span>
+                </div>
+                <input id="start-slider" type="range" min="0" max="0" step="0.1" value="0" />
+              </div>
+
+              <div class="control">
+                <div class="control-head">
+                  <label for="duration-slider">Animation length</label>
+                  <span id="duration-val" class="mono">6.0s</span>
+                </div>
+                <input id="duration-slider" type="range" min="1" max="6" step="0.5" value="6" />
+              </div>
+            </div>
+
+            <div class="control">
+              <label class="control-label">Sound</label>
+              <div class="segmented" role="radiogroup" aria-label="Sound source">
+                <button type="button" class="seg-btn active" data-sound="video">From video</button>
+                <button type="button" class="seg-btn" data-sound="upload">Upload audio</button>
+                <button type="button" class="seg-btn" data-sound="mute">No sound</button>
+              </div>
+            </div>
+
+            <div id="audio-upload-box" class="control hidden">
+              <label class="file-chip" for="audio-input">
+                <span>🎵</span>
+                <span id="audio-file-label">Choose audio file (MP3, WAV, M4A, OGG)</span>
+                <input id="audio-input" type="file" accept="audio/*,video/*" hidden />
+              </label>
+            </div>
+
+            <div id="volume-box" class="control">
+              <div class="control-head">
+                <label for="volume-slider">Audio volume</label>
+                <span id="volume-val" class="mono">100%</span>
+              </div>
+              <input id="volume-slider" type="range" min="0.2" max="2.0" step="0.1" value="1.0" />
+            </div>
+
+            <p id="build-error" class="error hidden"></p>
+
+            <button id="build-btn" type="button" class="btn btn-primary btn-lg">Build Sound Sticker</button>
+          </div>
+        </div>
+
+        <!-- Tab 2: YouTube link -->
+        <div id="youtube-tab-panel" class="stack hidden">
+          <form id="yt-fetch-form" class="inline-form">
+            <input
+              id="yt-url-input"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://youtube.com/watch?v=..."
+              aria-label="YouTube URL"
+              required
+            />
+            <button id="yt-fetch-btn" type="submit" class="btn btn-primary">Fetch</button>
+          </form>
+
+          <p id="yt-unavailable-note" class="error hidden">YouTube import is unavailable on this server (yt-dlp missing).</p>
+          <p id="yt-error" class="error hidden"></p>
+
+          <div id="yt-loaded" class="stack hidden">
+            <div class="yt-preview-grid">
+              <div class="yt-meta-card">
+                <img id="yt-thumb" class="yt-thumb" alt="Video thumbnail" />
+                <div class="yt-meta-text">
+                  <div id="yt-title" class="yt-title"></div>
+                  <div class="yt-sub muted small">
+                    <span id="yt-uploader"></span>
+                    <span id="yt-duration" class="mono"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="yt-embed-wrap">
+                <iframe
+                  id="yt-embed"
+                  title="YouTube clip preview"
+                  loading="lazy"
+                  allow="encrypted-media; picture-in-picture"
+                  referrerpolicy="strict-origin-when-cross-origin"
+                  allowfullscreen
+                ></iframe>
+              </div>
+            </div>
+
+            <div class="control">
+              <div class="control-head">
+                <label for="yt-start-input">Start time</label>
+                <span id="yt-range-val" class="mono small muted">0:00 – 0:06</span>
+              </div>
+              <div class="nudge-row">
+                <button id="yt-nudge-back" type="button" class="btn btn-secondary nudge-btn">−5s</button>
+                <input
+                  id="yt-start-input"
+                  type="text"
+                  inputmode="decimal"
+                  class="mono start-time-input"
+                  value="0:00"
+                  placeholder="0:00"
+                  aria-label="Start time (mm:ss, h:mm:ss, or seconds)"
+                />
+                <button id="yt-nudge-fwd" type="button" class="btn btn-secondary nudge-btn">+5s</button>
+              </div>
+            </div>
+
+            <div class="control">
+              <div class="control-head">
+                <label for="yt-duration-slider">Animation length</label>
+                <span id="yt-duration-val" class="mono">6.0s</span>
+              </div>
+              <input id="yt-duration-slider" type="range" min="1" max="6" step="0.5" value="6" />
+            </div>
+
+            <div class="control">
+              <label class="control-label">Sound</label>
+              <div class="segmented" role="radiogroup" aria-label="YouTube sound source">
+                <button type="button" class="seg-btn active" data-yt-sound="video">From video</button>
+                <button type="button" class="seg-btn" data-yt-sound="upload">Upload audio</button>
+                <button type="button" class="seg-btn" data-yt-sound="mute">No sound</button>
+              </div>
+            </div>
+
+            <div id="yt-audio-upload-box" class="control hidden">
+              <label class="file-chip" for="yt-audio-input">
+                <span>🎵</span>
+                <span id="yt-audio-file-label">Choose audio file (MP3, WAV, M4A, OGG)</span>
+                <input id="yt-audio-input" type="file" accept="audio/*,video/*" hidden />
+              </label>
+            </div>
+
+            <div id="yt-volume-box" class="control">
+              <div class="control-head">
+                <label for="yt-volume-slider">Audio volume</label>
+                <span id="yt-volume-val" class="mono">100%</span>
+              </div>
+              <input id="yt-volume-slider" type="range" min="0.2" max="2.0" step="0.1" value="1.0" />
+            </div>
+
+            <p id="yt-build-error" class="error hidden"></p>
+
+            <button id="yt-build-btn" type="button" class="btn btn-primary btn-lg">Build Sound Sticker</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 2: Building Progress -->
+      <section id="progress-card" class="card hidden">
+        <div class="spinner-row">
+          <div class="spinner" aria-hidden="true"></div>
+          <div>
+            <div id="progress-title" class="strong">Encoding sticker…</div>
+            <div id="progress-sub" class="muted small">512×512 animated WebP (≤500 KB) + Opus audio</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 3: Preview & Deliver -->
+      <section id="result-card" class="card stack hidden">
+        <div class="result-head">
+          <h2>Preview</h2>
+          <button id="tweak-btn" type="button" class="btn-link">Tweak &amp; rebuild</button>
+        </div>
+
+        <div id="result-source" class="result-source muted small hidden">
+          From YouTube: <a id="result-source-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+        </div>
+
+        <div class="sticker-stage" id="sticker-stage" title="Tap to play sound">
+          <img id="sticker-img" alt="Animated sound sticker preview" />
+          <span id="sticker-sound-badge" class="sound-badge hidden">🔊 Tap to play</span>
+        </div>
+
+        <audio id="sticker-audio" preload="auto"></audio>
+
+        <div class="meta-bar">
+          <span id="meta-size" class="mono"></span>
+          <span id="meta-audio" class="mono"></span>
+          <button id="play-audio-btn" type="button" class="btn btn-secondary btn-sm hidden">▶ Play sound</button>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="stack">
+          <div class="deliver-head">
+            <h3>Get it into WhatsApp</h3>
+            <p class="muted small">To include sound, WhatsApp requires delivery from a linked WhatsApp client.</p>
+          </div>
+
+          <div class="segmented" role="tablist" aria-label="Delivery mode">
+            <button type="button" class="seg-btn active" data-mode="relay">Server relay</button>
+            <button type="button" class="seg-btn" data-mode="self">Pair my own</button>
+          </div>
+
+          <!-- Relay Panel -->
+          <div id="relay-panel" class="stack">
+            <div class="control">
+              <label for="phone-input" class="control-label">Your WhatsApp number (with country code)</label>
+              <input id="phone-input" type="tel" inputmode="tel" autocomplete="tel" placeholder="e.g. 919876543210 or +1 415 555 2671" />
+            </div>
+            <button id="send-relay-btn" type="button" class="btn btn-primary btn-lg">Send to my WhatsApp</button>
+          </div>
+
+          <!-- Self Pair Panel -->
+          <div id="self-panel" class="stack hidden">
+            <div id="self-unpaired" class="stack">
+              <p class="muted small">Link your own WhatsApp (~20s, uses 1 linked-device slot) and we'll send the sticker straight to your <strong>Message yourself</strong> chat.</p>
+              <div class="pair-actions">
+                <button id="pair-qr-btn" type="button" class="btn btn-secondary">Show QR code</button>
+                <button id="pair-code-toggle-btn" type="button" class="btn btn-secondary">Use 8-digit code</button>
+              </div>
+              <div id="pair-code-form" class="inline-form hidden">
+                <input id="pair-phone-input" type="tel" inputmode="tel" placeholder="Phone with country code" />
+                <button id="pair-code-btn" type="button" class="btn btn-primary">Get code</button>
+              </div>
+              <div id="pair-output" class="pair-box hidden">
+                <img id="pair-qr-img" alt="WhatsApp link QR code" class="hidden" />
+                <div id="pair-code-display" class="pair-code hidden"></div>
+                <p id="pair-hint" class="muted small"></p>
+              </div>
+            </div>
+
+            <div id="self-paired" class="stack hidden">
+              <div class="paired-banner">
+                <span>✅ Linked as <strong id="self-me"></strong></span>
+                <button id="self-logout-btn" type="button" class="btn-link">Unlink</button>
+              </div>
+              <button id="send-self-btn" type="button" class="btn btn-primary btn-lg">Send to my WhatsApp</button>
+            </div>
+          </div>
+
+          <p id="send-error" class="error hidden"></p>
+          <p id="send-success" class="success hidden"></p>
+
+          <div class="download-row">
+            <button id="download-btn" type="button" class="btn btn-secondary btn-lg">Download files</button>
+          </div>
+        </div>
+
+        <!-- Favourites instructions card -->
+        <aside class="info-card">
+          <h4>Save it to your sticker tray</h4>
+          <ol>
+            <li>Open the sticker in WhatsApp on your phone (Android or iOS).</li>
+            <li><strong>Long-press</strong> the sticker → tap <strong>Add to favourites</strong>.</li>
+            <li>Reuse it in any chat from your ★ favourites sticker tray.</li>
+          </ol>
+          <p class="muted small">Tip: turn off silent mode on your phone and tap the sticker to hear the sound.</p>
+        </aside>
+      </section>
+    </div>
+
+    <footer class="footer">
+      <span>runs on my own server</span>
+    </footer>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

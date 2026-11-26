@@ -1,6 +1,9 @@
 node_modules/
 auth/
+data/
+.env
 debug.log
 last-sticker.webp
 last-sound.ogg
 .DS_Store
+.run/
