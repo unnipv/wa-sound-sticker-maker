@@ -62,11 +62,20 @@ start_tunnel() {
 
 URL=""
 if [ -x "$CF" ]; then
-  for attempt in 1 2; do
+  # Cloudflare rate-limits quick-tunnel provisioning (HTTP 429 "Tunnelstore request
+  # failed"), so back off instead of hammering it: 8 tries with growing delays (~6 min).
+  delay=5
+  for attempt in $(seq 1 8); do
     URL=$(start_tunnel)
     [ -n "$URL" ] && break
-    echo "[run] tunnel attempt $attempt produced no URL; retrying"
-    kill "$TUNNEL_PID" 2>/dev/null; sleep 3
+    if grep -q "429" "$RUN/tunnel.log" 2>/dev/null; then
+      echo "[run] cloudflared rate-limited (429) on attempt $attempt; waiting ${delay}s"
+    else
+      echo "[run] tunnel attempt $attempt produced no URL; waiting ${delay}s"
+    fi
+    kill "$TUNNEL_PID" 2>/dev/null
+    sleep "$delay"
+    delay=$(( delay * 2 )); [ "$delay" -gt 120 ] && delay=120
   done
 else
   echo "[run] cloudflared missing at $CF"
@@ -94,7 +103,11 @@ $URL
   fi
 else
   echo "http://127.0.0.1:$PORT" > "$RUN/url"
-  notify "⚠️ Sticker studio restarted — $STAMP — but the Cloudflare tunnel did not come up. Local only: http://127.0.0.1:$PORT"
+  LAN=$(ip -4 addr show scope global 2>/dev/null | grep -oE 'inet 192\.168\.[0-9.]+' | awk '{print $2}' | head -1)
+  notify "⚠️ Sticker studio restarted — $STAMP — Cloudflare will not give us a public link right now (it rate-limits quick tunnels; retried 8 times).
+Local only: http://127.0.0.1:$PORT${LAN:+
+Same Wi-Fi: http://$LAN:$PORT}
+I'll send a fresh public link on the next restart that succeeds."
 fi
 
 # --- supervise ------------------------------------------------------------
