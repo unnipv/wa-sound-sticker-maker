@@ -59,35 +59,34 @@
           </div>
 
           <div id="tune-panel" class="stack hidden">
-            <div class="media-stage">
-              <video id="video-preview" playsinline muted loop controls class="hidden"></video>
-              <img id="image-preview" alt="Selected media preview" class="hidden" />
-            </div>
+            <div class="trim-editor">
+              <div id="upload-frame" class="player-frame">
+                <video id="video-preview" playsinline preload="auto" class="hidden"></video>
+                <img id="image-preview" alt="Selected media preview" class="hidden" />
+              </div>
 
-            <div class="file-row">
-              <span id="file-name" class="file-name"></span>
-              <button id="change-media-btn" type="button" class="btn-link">Change file</button>
+              <div class="file-row">
+                <span id="file-name" class="file-name"></span>
+                <button id="change-media-btn" type="button" class="btn-link">Change file</button>
+              </div>
+
+              <div id="video-controls" class="stack hidden">
+                <div id="upload-trim"></div>
+                <!-- Source of truth for the upload job's `start` (written by the trim editor) -->
+                <input id="start-slider" type="range" min="0" max="0" step="0.1" value="0" class="hidden" tabindex="-1" aria-hidden="true" />
+                <span id="start-val" class="value mono">0:00</span>
+
+                <div class="control">
+                  <div class="control-head">
+                    <label for="duration-slider">Animation length</label>
+                    <span id="duration-val" class="value mono">6.0s</span>
+                  </div>
+                  <input id="duration-slider" type="range" min="1" max="6" step="0.1" value="6" />
+                </div>
+              </div>
             </div>
 
             <div class="section-label">Look</div>
-
-            <div id="video-controls" class="stack hidden">
-              <div class="control">
-                <div class="control-head">
-                  <label for="start-slider">Start time</label>
-                  <span id="start-val" class="value mono">0.0s</span>
-                </div>
-                <input id="start-slider" type="range" min="0" max="0" step="0.1" value="0" />
-              </div>
-
-              <div class="control">
-                <div class="control-head">
-                  <label for="duration-slider">Animation length</label>
-                  <span id="duration-val" class="value mono">6.0s</span>
-                </div>
-                <input id="duration-slider" type="range" min="1" max="6" step="0.5" value="6" />
-              </div>
-            </div>
 
             <div class="control">
               <span class="control-label" id="fit-label">Framing</span>
@@ -156,38 +155,25 @@
           </div>
 
           <div id="yt-loaded" class="stack hidden">
-            <div class="yt-preview-grid">
-              <div class="yt-meta-card">
-                <img id="yt-thumb" class="yt-thumb" alt="Video thumbnail" />
-                <div class="yt-meta-text">
-                  <div id="yt-title" class="yt-title"></div>
-                  <div class="yt-sub muted small">
-                    <span id="yt-uploader"></span>
-                    <span id="yt-duration" class="mono"></span>
-                  </div>
-                </div>
+            <div class="trim-editor">
+              <!-- One full-width 16:9 player. Everything inside is absolutely positioned to inset:0. -->
+              <div id="yt-frame" class="player-frame player-frame-16x9">
+                <img id="yt-thumb" class="player-poster" alt="" />
+                <div id="yt-player-slot" class="player-slot"></div>
               </div>
-              <div class="yt-embed-wrap">
-                <iframe
-                  id="yt-embed"
-                  title="YouTube clip preview"
-                  loading="lazy"
-                  allow="encrypted-media; picture-in-picture"
-                  referrerpolicy="strict-origin-when-cross-origin"
-                  allowfullscreen
-                ></iframe>
-              </div>
-            </div>
 
-            <div class="section-label">Look</div>
-
-            <div class="control">
-              <div class="control-head">
-                <label for="yt-start-input">Start time</label>
-                <span id="yt-range-val" class="value mono">0:00 – 0:06</span>
+              <div class="yt-meta-line">
+                <span id="yt-title" class="yt-title"></span>
+                <span class="yt-sub muted small">
+                  <span id="yt-uploader"></span>
+                  <span id="yt-duration" class="mono"></span>
+                </span>
               </div>
-              <div class="nudge-row">
-                <button id="yt-nudge-back" type="button" class="btn btn-secondary nudge-btn" aria-label="Back 5 seconds">−5s</button>
+
+              <div id="yt-trim"></div>
+
+              <!-- Moved into the trim editor's nudge row at startup; stays the source of truth for `start`. -->
+              <div class="trim-field-src">
                 <input
                   id="yt-start-input"
                   type="text"
@@ -195,20 +181,23 @@
                   class="mono start-time-input"
                   value="0:00"
                   placeholder="0:00"
+                  aria-label="Start time"
                   aria-describedby="yt-start-help"
                 />
-                <button id="yt-nudge-fwd" type="button" class="btn btn-secondary nudge-btn" aria-label="Forward 5 seconds">+5s</button>
+                <span id="yt-range-val" class="value mono">0:00 – 0:06</span>
+                <span id="yt-start-help" class="sr-only">mm:ss, h:mm:ss, or seconds</span>
               </div>
-              <span id="yt-start-help" class="sr-only">mm:ss, h:mm:ss, or seconds</span>
+
+              <div class="control">
+                <div class="control-head">
+                  <label for="yt-duration-slider">Animation length</label>
+                  <span id="yt-duration-val" class="value mono">6.0s</span>
+                </div>
+                <input id="yt-duration-slider" type="range" min="1" max="6" step="0.1" value="6" />
+              </div>
             </div>
 
-            <div class="control">
-              <div class="control-head">
-                <label for="yt-duration-slider">Animation length</label>
-                <span id="yt-duration-val" class="value mono">6.0s</span>
-              </div>
-              <input id="yt-duration-slider" type="range" min="1" max="6" step="0.5" value="6" />
-            </div>
+            <div class="section-label">Look</div>
 
             <div class="control">
               <span class="control-label" id="yt-fit-label">Framing</span>
@@ -379,6 +368,66 @@
       <span>runs on my own server</span>
     </footer>
   </main>
+
+  <!-- Trim editor UI, cloned once per source (upload video / YouTube) by createTrimEditor() in app.js -->
+  <template id="trim-editor-tpl">
+    <div class="te" data-te="root">
+      <div class="te-bar">
+        <button type="button" class="te-icon-btn" data-te="play" aria-label="Play">
+          <span class="te-ico-play" aria-hidden="true"></span>
+        </button>
+        <span class="te-clock mono" data-te="clock" aria-live="off">0:00.0 / 0:00</span>
+      </div>
+
+      <div class="tl" data-te="timeline">
+        <div class="tl-track" data-te="track">
+          <div class="tl-dim tl-dim-l" data-te="dim-l"></div>
+          <div class="tl-dim tl-dim-r" data-te="dim-r"></div>
+          <div class="tl-band" data-te="band" role="slider" tabindex="0" aria-label="Selection start"
+               aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+            <span class="tl-handle tl-handle-l" data-te="handle-l" aria-hidden="true"><span class="tl-grip"></span></span>
+            <span class="tl-handle tl-handle-r" data-te="handle-r" aria-hidden="true"><span class="tl-grip"></span></span>
+          </div>
+          <div class="tl-playhead" data-te="playhead" aria-hidden="true"><span class="tl-playhead-line"></span></div>
+        </div>
+      </div>
+      <div class="tl-under">
+        <span class="tl-band-time mono" data-te="band-time"><span data-te="band-range">0:00.0 → 0:06.0</span> <span class="tl-len-chip" data-te="band-len">6.0s</span></span>
+      </div>
+
+      <div class="te-actions">
+        <button type="button" class="btn btn-secondary" data-te="set-start">Set start here</button>
+        <button type="button" class="btn btn-secondary te-toggle" data-te="preview" aria-pressed="false">
+          <span class="te-ico-loop" aria-hidden="true">⟳</span> Preview selection
+        </button>
+      </div>
+
+      <div class="control te-start">
+        <div class="control-head">
+          <label data-te="field-label">Start time</label>
+          <span data-te="readout" class="value mono"></span>
+        </div>
+        <div class="nudge-row">
+          <button type="button" class="btn btn-secondary nudge-btn" data-te="nudge" data-delta="-5" aria-label="Start back 5 seconds">−5</button>
+          <button type="button" class="btn btn-secondary nudge-btn" data-te="nudge" data-delta="-1" aria-label="Start back 1 second">−1</button>
+          <span data-te="field" class="te-start-out mono"></span>
+          <button type="button" class="btn btn-secondary nudge-btn" data-te="nudge" data-delta="1" aria-label="Start forward 1 second">+1</button>
+          <button type="button" class="btn btn-secondary nudge-btn" data-te="nudge" data-delta="5" aria-label="Start forward 5 seconds">+5</button>
+        </div>
+        <p class="te-keys muted small">Drag the green window · ←/→ 0.1 s · Shift 1 s</p>
+      </div>
+    </div>
+
+    <!-- frame overlay: appended into the player frame -->
+    <div class="te-overlay" data-te="overlay">
+      <button type="button" class="te-shield" data-te="shield" tabindex="-1" aria-hidden="true"></button>
+      <button type="button" class="te-bigplay" data-te="bigplay" aria-label="Play">
+        <span class="te-ico-play" aria-hidden="true"></span>
+      </button>
+      <div class="te-status hidden" data-te="status"></div>
+      <div class="te-note hidden" data-te="note" role="status"></div>
+    </div>
+  </template>
 
   <script type="module" src="/app.js"></script>
 </body>

@@ -20,8 +20,6 @@ const state = {
     startSec: 0,
     soundMode: 'video', // video | upload | mute
     audioFile: null,
-    embedTimer: null,
-    lastEmbedStart: null,
   },
 };
 
@@ -81,12 +79,541 @@ document.addEventListener('input', (e) => {
   if (e.target instanceof HTMLInputElement && e.target.type === 'range') paintRange(e.target);
 });
 
+// ---------------------------------------------------------------------------
+// Trim editor — one component for both sources. Playback goes through an
+// adapter: { caps, getTime(), isPlaying(), seek(t, {pause}), play(), pause() }.
+//   caps.play     our play/pause controls can drive it
+//   caps.preview  true = looped preview, 'once' = one-shot (plain embed)
+//   caps.shield   cover the media with our click layer (hides YouTube's chrome)
+//   caps.surface  it paints a picture (otherwise the poster stays up)
+// ---------------------------------------------------------------------------
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const tenth = (v) => Math.round(v * 10) / 10;
+const floorTenth = (v) => Math.floor(v * 10 + 1e-6) / 10;
+
+// 0:34.2 (decimals=1) or 7:34 (decimals=0); h:mm:ss when needed
+function formatClock(sec, decimals = 1) {
+  const s = Math.max(0, Number(sec) || 0);
+  const tenths = decimals ? Math.round(s * 10) : Math.floor(s) * 10;
+  const whole = Math.floor(tenths / 10);
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const base = h > 0 ? `${h}:${pad2(m)}:${pad2(whole % 60)}` : `${m}:${pad2(whole % 60)}`;
+  return decimals ? `${base}.${tenths % 10}` : base;
+}
+
+const NO_PLAYBACK = Object.freeze({
+  caps: { play: false, preview: false, shield: false, surface: false },
+  getTime: () => 0,
+  isPlaying: () => false,
+  seek() {},
+  play() {},
+  pause() {},
+});
+
+function createTrimEditor({ mount, frame, idPrefix, field = null, readout = null, poster = null, minLen = 1, maxLen = 6, onChange = () => {} }) {
+  const frag = $('trim-editor-tpl').content.cloneNode(true);
+  const root = frag.querySelector('[data-te="root"]');
+  const overlay = frag.querySelector('[data-te="overlay"]');
+  const q = (name, scope = root) => scope.querySelector(`[data-te="${name}"]`);
+  const el = {
+    play: q('play'),
+    clock: q('clock'),
+    timeline: q('timeline'),
+    track: q('track'),
+    dimL: q('dim-l'),
+    dimR: q('dim-r'),
+    band: q('band'),
+    playhead: q('playhead'),
+    bandTime: q('band-time'),
+    bandRange: q('band-range'),
+    bandLen: q('band-len'),
+    setStart: q('set-start'),
+    preview: q('preview'),
+    fieldLabel: q('field-label'),
+    readout: q('readout'),
+    startOut: q('field'),
+    shield: q('shield', overlay),
+    bigplay: q('bigplay', overlay),
+    status: q('status', overlay),
+    note: q('note', overlay),
+  };
+
+  root.querySelectorAll('[data-te="nudge"]').forEach((btn) => {
+    const d = Number(btn.dataset.delta);
+    if (idPrefix && d === -5) btn.id = `${idPrefix}-nudge-back`;
+    if (idPrefix && d === 5) btn.id = `${idPrefix}-nudge-fwd`;
+    btn.addEventListener('click', () => nudge(d));
+  });
+  if (field) {
+    el.startOut.replaceWith(field);
+    el.startOut = null;
+    el.fieldLabel.htmlFor = field.id;
+  }
+  if (readout) {
+    el.readout.replaceWith(readout);
+    el.readout = readout;
+  }
+  mount.appendChild(root);
+  frame.appendChild(overlay);
+
+  const s = {
+    dur: 0,
+    start: 0,
+    len: maxLen,
+    playhead: 0,
+    adapter: NO_PLAYBACK,
+    previewing: false,
+    drag: null,
+    raf: 0,
+    scrubbed: false, // paused on a frame the user picked — keep the big button out of the way
+    started: false, // first play/seek happened (poster can go)
+    loopSeekAt: 0,
+    idleSince: 0,
+  };
+
+  const lenMax = () => (s.dur > 0 ? Math.max(0.1, floorTenth(Math.min(maxLen, s.dur))) : maxLen);
+  const lenMin = () => Math.min(minLen, lenMax());
+  const pct = (t) => (s.dur > 0 ? clamp((t / s.dur) * 100, 0, 100) : 0);
+
+  function normalize(start, len) {
+    const l = clamp(tenth(len), lenMin(), lenMax());
+    const st = clamp(tenth(start), 0, Math.max(0, floorTenth(s.dur - l)));
+    return [tenth(st), tenth(l)];
+  }
+
+  const getSelection = () => ({ start: s.start, len: s.len, end: tenth(s.start + s.len) });
+
+  function setSelection(start, len = s.len, { seek = false, emit = false, seekTo = 'start' } = {}) {
+    [s.start, s.len] = normalize(Number.isFinite(start) ? start : 0, Number.isFinite(len) ? len : s.len);
+    if (seek) userSeek(seekTo === 'end' ? s.start + s.len : s.start);
+    else render();
+    if (emit) onChange(getSelection());
+  }
+
+  // A seek the user asked for: stop any playback and hold on that frame.
+  function userSeek(t) {
+    s.previewing = false;
+    s.playhead = clamp(t, 0, s.dur || 0);
+    s.scrubbed = true;
+    s.started = true;
+    s.adapter.seek(s.playhead, { pause: true });
+    render();
+  }
+
+  function nudge(delta) {
+    setSelection(s.start + delta, s.len, { seek: true, emit: true });
+  }
+
+  function togglePlay() {
+    const a = s.adapter;
+    if (!a.caps.play) return;
+    if (a.isPlaying()) {
+      s.previewing = false;
+      a.pause();
+    } else {
+      s.scrubbed = false;
+      s.started = true;
+      if (s.playhead >= s.dur - 0.05) {
+        s.playhead = 0;
+        a.seek(0, { pause: false });
+      }
+      a.play();
+    }
+    s.idleSince = performance.now();
+    wake();
+  }
+
+  function togglePreview() {
+    const a = s.adapter;
+    if (!a.caps.preview) return;
+    if (s.previewing) {
+      s.previewing = false;
+      a.pause();
+      render();
+      return;
+    }
+    s.scrubbed = false;
+    s.started = true;
+    const { start, end } = getSelection();
+    s.playhead = start;
+    if (a.caps.preview === 'once') {
+      a.previewRange(start, end);
+      render();
+      return;
+    }
+    s.previewing = true;
+    s.loopSeekAt = performance.now();
+    s.idleSince = s.loopSeekAt;
+    a.seek(start, { pause: false });
+    a.play();
+    wake();
+  }
+
+  function pause() {
+    s.previewing = false;
+    if (s.adapter.isPlaying()) s.adapter.pause();
+    render();
+  }
+
+  // Playback loop: only runs while something is playing / previewing.
+  function wake() {
+    if (s.raf) return;
+    s.raf = requestAnimationFrame(step);
+  }
+  function step() {
+    s.raf = 0;
+    const a = s.adapter;
+    const playing = a.isPlaying();
+    const now = performance.now();
+    if (!s.drag && (playing || s.previewing)) {
+      if (playing) {
+        s.playhead = a.getTime();
+        s.idleSince = now;
+      }
+      if (s.previewing && now - s.loopSeekAt > 350) {
+        const { start, end } = getSelection();
+        const pastEnd = s.playhead >= end - 0.03;
+        const ended = !playing && now - s.loopSeekAt > 1000 && a.getTime() >= Math.min(end, s.dur) - 0.3;
+        if (pastEnd || ended || (playing && s.playhead < start - 0.5)) {
+          // Loop while the toggle stays on
+          s.loopSeekAt = now;
+          s.playhead = start;
+          a.seek(start, { pause: false });
+          a.play();
+        } else if (!playing && now - s.idleSince > 4000) {
+          s.previewing = false; // stalled or paused from outside
+        }
+      }
+    }
+    render();
+    if (playing || s.previewing) s.raf = requestAnimationFrame(step);
+  }
+
+  function render() {
+    const a = s.adapter;
+    const caps = a.caps;
+    const playing = a.isPlaying();
+    const { start, len, end } = getSelection();
+
+    el.band.style.left = `${pct(start)}%`;
+    el.band.style.width = `max(4px, ${pct(len)}%)`;
+    el.dimL.style.width = `${pct(start)}%`;
+    el.dimR.style.left = `${pct(end)}%`;
+    el.playhead.style.left = `${pct(s.playhead)}%`;
+
+    el.clock.textContent = `${formatClock(s.playhead)} / ${formatClock(s.dur, 0)}`;
+    el.bandRange.textContent = `${formatClock(start)} → ${formatClock(end)}`;
+    el.bandLen.textContent = `${len.toFixed(1)}s`;
+    if (el.readout) el.readout.textContent = `${formatClock(start)} – ${formatClock(end)}`;
+    if (el.startOut) el.startOut.textContent = formatClock(start);
+
+    el.band.setAttribute('aria-valuemax', String(Math.max(0, floorTenth(s.dur - len))));
+    el.band.setAttribute('aria-valuenow', String(start));
+    el.band.setAttribute('aria-valuetext', `${formatClock(start)} to ${formatClock(end)}, ${len.toFixed(1)} seconds`);
+
+    root.classList.toggle('can-play', caps.play);
+    root.classList.toggle('is-playing', playing);
+    root.classList.toggle('is-previewing', s.previewing);
+    el.play.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    el.preview.setAttribute('aria-pressed', String(s.previewing));
+    el.preview.disabled = !caps.preview || !(s.dur > 0);
+    el.setStart.disabled = !(s.dur > 0);
+
+    overlay.classList.toggle('has-shield', caps.shield);
+    el.bigplay.classList.toggle('hidden', !(caps.play && !playing && !s.drag && !s.scrubbed));
+    if (poster) poster.classList.toggle('hidden', caps.surface && (!caps.play || s.started));
+
+    // Frame time under the band, kept inside the timeline
+    const tw = el.track.clientWidth;
+    if (tw > 0) {
+      const center = el.track.offsetLeft + (tw * pct(start + len / 2)) / 100;
+      const lw = el.bandTime.offsetWidth;
+      const W = el.timeline.clientWidth;
+      el.bandTime.style.left = `${clamp(center - lw / 2, 0, Math.max(0, W - lw))}px`;
+    }
+  }
+
+  // --- Timeline dragging ----------------------------------------------------
+  const timeAt = (clientX) => {
+    const r = el.track.getBoundingClientRect();
+    return r.width > 0 ? clamp((clientX - r.left) / r.width, 0, 1) * s.dur : 0;
+  };
+
+  function applyDrag(clientX) {
+    const d = s.drag;
+    const t = timeAt(clientX);
+    if (d.mode === 'move') {
+      setSelection(t - d.grab, s.len);
+      userSeek(s.start);
+    } else if (d.mode === 'resize-l') {
+      const st = clamp(tenth(t - d.grab), Math.max(0, d.end - lenMax()), d.end - lenMin());
+      setSelection(st, d.end - st);
+      userSeek(s.start);
+    } else if (d.mode === 'resize-r') {
+      setSelection(s.start, t - d.grabEnd - s.start);
+      userSeek(s.start + s.len);
+    } else {
+      userSeek(t);
+      return;
+    }
+    onChange(getSelection());
+  }
+
+  el.timeline.addEventListener('pointerdown', (e) => {
+    if ((e.pointerType === 'mouse' && e.button !== 0) || !(s.dur > 0)) return;
+    e.preventDefault();
+    const part = e.target.closest('[data-te]')?.dataset.te;
+    const mode = part === 'handle-l' ? 'resize-l' : part === 'handle-r' ? 'resize-r' : part === 'band' ? 'move' : 'scrub';
+    const t = timeAt(e.clientX);
+    // grab offsets: the edge/band moves with the pointer instead of jumping to it
+    s.drag = { mode, id: e.pointerId, grab: t - s.start, grabEnd: t - (s.start + s.len), end: tenth(s.start + s.len) };
+    el.timeline.setPointerCapture(e.pointerId);
+    root.classList.add('is-dragging');
+    root.dataset.drag = mode;
+    el.band.focus({ preventScroll: true });
+    if (mode === 'scrub') userSeek(t);
+    else userSeek(mode === 'resize-r' ? s.start + s.len : s.start); // show the frame being picked right away
+  });
+  el.timeline.addEventListener('pointermove', (e) => {
+    if (s.drag && e.pointerId === s.drag.id) applyDrag(e.clientX);
+  });
+  const endDrag = (e) => {
+    if (!s.drag || e.pointerId !== s.drag.id) return;
+    s.drag = null;
+    root.classList.remove('is-dragging');
+    delete root.dataset.drag;
+    onChange(getSelection());
+    render();
+  };
+  el.timeline.addEventListener('pointerup', endDrag);
+  el.timeline.addEventListener('pointercancel', endDrag);
+  el.timeline.addEventListener('lostpointercapture', endDrag);
+
+  // Keyboard: ←/→ 0.1 s, Shift 1 s (band start) whenever focus is inside the editor
+  const onKey = (e) => {
+    if (e.target instanceof HTMLInputElement || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    nudge((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 0.1));
+  };
+  root.addEventListener('keydown', onKey);
+  overlay.addEventListener('keydown', onKey);
+
+  el.play.addEventListener('click', togglePlay);
+  el.bigplay.addEventListener('click', togglePlay);
+  el.shield.addEventListener('click', togglePlay);
+  el.preview.addEventListener('click', togglePreview);
+  el.setStart.addEventListener('click', () => {
+    setSelection(s.playhead, s.len, { emit: true });
+  });
+
+  new ResizeObserver(() => render()).observe(root);
+
+  return {
+    getSelection,
+    setSelection,
+    pause,
+    get playhead() {
+      return s.playhead;
+    },
+    setDuration(d) {
+      s.dur = Math.max(0, Number(d) || 0);
+      s.playhead = clamp(s.playhead, 0, s.dur);
+      [s.start, s.len] = normalize(s.start, s.len);
+      render();
+    },
+    setAdapter(adapter) {
+      if (s.adapter !== adapter && s.adapter.isPlaying()) s.adapter.pause();
+      s.adapter = adapter || NO_PLAYBACK;
+      if (s.adapter !== NO_PLAYBACK) s.adapter.onState = wake;
+      s.previewing = false;
+      s.scrubbed = false;
+      s.started = false;
+      s.playhead = 0;
+      render();
+    },
+    setStatus(text) {
+      el.status.textContent = text || '';
+      el.status.classList.toggle('hidden', !text);
+    },
+    setNote(text) {
+      el.note.textContent = text || '';
+      el.note.classList.toggle('hidden', !text);
+    },
+  };
+}
+
+// <video> adapter — one per element, reused across files
+function videoAdapter(video) {
+  let pending = null;
+  const a = {
+    caps: { play: true, preview: true, shield: true, surface: true },
+    onState: null,
+    getTime: () => video.currentTime || 0,
+    isPlaying: () => !video.paused && !video.ended,
+    seek(t, { pause = true } = {}) {
+      if (pause && !video.paused) video.pause();
+      if (video.readyState < 1 || video.seeking) {
+        pending = t; // latest wins; applied on 'seeked'/'loadedmetadata'
+        return;
+      }
+      video.currentTime = t;
+    },
+    play() {
+      video.play().catch(() => a.onState?.());
+    },
+    pause() {
+      video.pause();
+    },
+  };
+  const flush = () => {
+    if (pending != null && !video.seeking && video.readyState >= 1) {
+      const t = pending;
+      pending = null;
+      video.currentTime = t;
+    }
+    a.onState?.();
+  };
+  video.addEventListener('seeked', flush);
+  video.addEventListener('loadedmetadata', flush);
+  ['play', 'pause', 'ended', 'playing'].forEach((ev) => video.addEventListener(ev, () => a.onState?.()));
+  return a;
+}
+
+// YouTube IFrame Player API adapter
+function ytApiAdapter(player) {
+  const PLAYING = 1;
+  const BUFFERING = 3;
+  let holdPause = false; // seekTo() on a cued video starts playback — swallow that
+  let lastSeek = 0;
+  let trailing = null;
+  let target = 0;
+  const a = {
+    caps: { play: true, preview: true, shield: true, surface: true },
+    onState: null,
+    getTime() {
+      try {
+        return holdPause ? target : player.getCurrentTime() || 0;
+      } catch {
+        return target;
+      }
+    },
+    isPlaying() {
+      if (holdPause) return false;
+      const st = player.getPlayerState?.();
+      return st === PLAYING || st === BUFFERING;
+    },
+    seek(t, { pause = true } = {}) {
+      target = t;
+      if (pause && !holdPause) {
+        holdPause = true;
+        player.mute?.();
+        player.pauseVideo?.();
+      } else if (!pause) {
+        holdPause = false;
+      }
+      const run = () => {
+        trailing = null;
+        lastSeek = performance.now();
+        player.seekTo?.(target, true);
+        if (holdPause) player.pauseVideo?.();
+      };
+      const wait = 120 - (performance.now() - lastSeek); // throttle network seeks while dragging
+      if (wait <= 0) run();
+      else if (!trailing) trailing = setTimeout(run, wait);
+    },
+    play() {
+      holdPause = false;
+      player.unMute?.();
+      player.playVideo?.();
+    },
+    pause() {
+      player.pauseVideo?.();
+    },
+    handleState(st) {
+      if (holdPause && st === PLAYING) player.pauseVideo?.();
+      a.onState?.();
+    },
+  };
+  return a;
+}
+
+// Plain-embed fallback (no IFrame API): the timeline still moves the embed via ?start=
+function ytEmbedAdapter(iframe, videoId) {
+  let t = 0;
+  let timer = null;
+  let lastStart = null;
+  const load = (params) => {
+    const qs = new URLSearchParams({ playsinline: '1', rel: '0', ...params });
+    iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?${qs}`;
+  };
+  load({ start: '0' });
+  lastStart = 0;
+  return {
+    caps: { play: false, preview: 'once', shield: false, surface: true },
+    onState: null,
+    getTime: () => t,
+    isPlaying: () => false,
+    seek(sec) {
+      t = sec;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const f = Math.floor(t);
+        if (f === lastStart) return;
+        lastStart = f;
+        load({ start: String(f) });
+      }, 450);
+    },
+    previewRange(from, to) {
+      clearTimeout(timer);
+      lastStart = null;
+      load({ start: String(Math.floor(from)), end: String(Math.ceil(to)), autoplay: '1' });
+    },
+    play() {},
+    pause() {},
+  };
+}
+
+// Lazy IFrame API loader — resolves YT or null after ~8 s
+let ytApiPromise = null;
+function loadYtApi(timeoutMs = 8000) {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (!ytApiPromise) {
+    ytApiPromise = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), timeoutMs);
+      const prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        prev?.();
+        clearTimeout(timer);
+        resolve(window.YT);
+      };
+      const script = document.createElement('script');
+      script.src = 'https://www.youtube.com/iframe_api';
+      script.async = true;
+      script.onerror = () => {
+        clearTimeout(timer);
+        resolve(null);
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return ytApiPromise.then((yt) => yt || (window.YT?.Player ? window.YT : null));
+}
+
 // Turn raw server/ffmpeg errors into something a person can act on.
 function friendlyError(err) {
-  const msg = String(err?.message || '').trim();
-  if (err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg)) {
+  if (err instanceof ApiNetworkError) {
     return "Couldn't reach the server. Check your connection and try again.";
   }
+  if (err instanceof TypeError || err instanceof ReferenceError || err instanceof RangeError || err instanceof SyntaxError) {
+    // a bug on our side, not something the server said — don't dress it up as one
+    console.error(err);
+    return 'Something went wrong on this page. Please try again.';
+  }
+  const msg = String(err?.message || '').trim();
   if (/^ffmpeg failed/i.test(msg)) {
     return "We couldn't decode that file. It may be damaged or in an unusual format — try exporting it as MP4 or PNG and upload again.";
   }
@@ -144,11 +671,22 @@ function setError(el, msg) {
   }
 }
 
+// Errors from our own API: ApiNetworkError = the request never got an answer,
+// ApiError = the server answered with a failure. Anything else is a page bug.
+class ApiError extends Error {}
+class ApiNetworkError extends ApiError {}
+
 async function api(url, opts = {}) {
-  const res = await fetch(url, opts);
+  let res;
+  try {
+    res = await fetch(url, opts);
+  } catch (cause) {
+    if (cause?.name === 'AbortError') throw cause;
+    throw new ApiNetworkError(`Request to ${url} failed`, { cause });
+  }
   const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
   if (!res.ok || data.ok === false) {
-    const err = new Error(data.error || `Request failed (${res.status})`);
+    const err = new ApiError(data.error || `Request failed (${res.status})`);
     err.code = data.errorCode || null;
     err.status = res.status;
     throw err;
@@ -280,9 +818,17 @@ function handleMediaFile(file) {
 
   const vid = $('video-preview');
   const img = $('image-preview');
+  const frame = $('upload-frame');
+  const setFrameRatio = (w, h) => {
+    // Square for portrait, up to 16:9 for landscape; media is letterboxed inside
+    if (w > 0 && h > 0) frame.style.setProperty('--ar', String(clamp(w / h, 1, 16 / 9)));
+  };
 
+  upEditor.setAdapter(null);
+  upEditor.setDuration(0);
   if (isVideo) {
     show(img, false);
+    img.removeAttribute('src');
     show(vid, true);
     show($('video-controls'), true);
     vid.src = state.mediaObjectUrl;
@@ -290,17 +836,26 @@ function handleMediaFile(file) {
       const dur = Number.isFinite(vid.duration) ? vid.duration : 0;
       state.mediaDuration = dur;
       state.mediaDims = { w: vid.videoWidth, h: vid.videoHeight };
+      setFrameRatio(vid.videoWidth, vid.videoHeight);
       updateFitHints();
-      updateStartSliderBounds();
+      const slider = $('duration-slider');
+      slider.max = String(Math.max(1, Math.min(6, floorTenth(dur))));
+      $('start-slider').max = String(Math.max(0, floorTenth(dur)));
+      upEditor.setDuration(dur);
+      upEditor.setAdapter(uploadPlayback);
+      upEditor.setSelection(0, Number(slider.value) || 6, { emit: true });
+      if (vid.currentTime === 0) vid.currentTime = 0.01; // paint the first frame on mobile Safari
     };
     setSoundMode('video');
   } else {
     show(vid, false);
     vid.removeAttribute('src');
+    vid.load();
     show($('video-controls'), false);
     show(img, true);
     img.onload = () => {
       state.mediaDims = { w: img.naturalWidth, h: img.naturalHeight };
+      setFrameRatio(img.naturalWidth, img.naturalHeight);
       updateFitHints();
     };
     img.src = state.mediaObjectUrl;
@@ -309,29 +864,28 @@ function handleMediaFile(file) {
   }
 }
 
-function updateStartSliderBounds() {
-  const len = Number($('duration-slider').value) || 6;
-  const maxStart = Math.max(0, Number((state.mediaDuration - Math.min(len, state.mediaDuration)).toFixed(1)));
-  const slider = $('start-slider');
-  slider.max = String(maxStart);
-  if (Number(slider.value) > maxStart) slider.value = String(maxStart);
-  $('start-val').textContent = `${Number(slider.value).toFixed(1)}s`;
-  paintAllRanges();
+function setLengthUi(sliderId, labelId, len) {
+  const slider = $(sliderId);
+  slider.value = String(len);
+  $(labelId).textContent = `${len.toFixed(1)}s`;
+  paintRange(slider);
 }
 
-$('start-slider').addEventListener('input', () => {
-  const val = Number($('start-slider').value) || 0;
-  $('start-val').textContent = `${val.toFixed(1)}s`;
-  const vid = $('video-preview');
-  if (state.mediaIsVideo && vid.readyState >= 1) {
-    vid.currentTime = val;
-  }
+const upEditor = createTrimEditor({
+  mount: $('upload-trim'),
+  frame: $('upload-frame'),
+  idPrefix: 'up',
+  readout: $('start-val'),
+  onChange: ({ start, len }) => {
+    $('start-slider').value = String(start);
+    setLengthUi('duration-slider', 'duration-val', len);
+  },
 });
+const uploadPlayback = videoAdapter($('video-preview'));
 
 $('duration-slider').addEventListener('input', () => {
   const val = Number($('duration-slider').value) || 6;
-  $('duration-val').textContent = `${val.toFixed(1)}s`;
-  updateStartSliderBounds();
+  upEditor.setSelection(upEditor.getSelection().start, val, { emit: true });
 });
 
 $('volume-slider').addEventListener('input', () => {
@@ -371,6 +925,7 @@ $('build-btn').addEventListener('click', async () => {
   if (state.soundMode === 'upload' && state.audioFile) {
     fd.append('audio', state.audioFile);
   }
+  upEditor.pause();
   fd.append('start', $('start-slider').value || '0');
   fd.append('duration', $('duration-slider').value || '6');
   fd.append('mute', state.soundMode === 'mute' ? 'true' : 'false');
@@ -416,6 +971,12 @@ function setSourceTab(tab) {
   });
   show($('upload-tab-panel'), tab === 'upload');
   show($('youtube-tab-panel'), tab === 'youtube');
+  if (tab === 'youtube') {
+    upEditor.pause();
+    loadYtApi(); // lazy: only fetched once the YouTube tab is opened
+  } else {
+    ytEditor.pause();
+  }
 }
 
 document.querySelectorAll('[data-source-tab]').forEach((btn) => {
@@ -429,15 +990,15 @@ function renderYouTubeAvailability() {
 }
 
 function formatTimestamp(sec) {
-  const s = Math.max(0, Number(sec) || 0);
-  const whole = Math.floor(s);
-  const frac = Math.round((s - whole) * 10);
+  const tenths = Math.round(Math.max(0, Number(sec) || 0) * 10);
+  const whole = Math.floor(tenths / 10);
+  const frac = tenths % 10;
   const h = Math.floor(whole / 3600);
   const m = Math.floor((whole % 3600) / 60);
   const rem = whole % 60;
   const pad2 = (n) => String(n).padStart(2, '0');
   const base = h > 0 ? `${h}:${pad2(m)}:${pad2(rem)}` : `${m}:${pad2(rem)}`;
-  return frac > 0 && frac < 10 ? `${base}.${frac}` : base;
+  return frac > 0 ? `${base}.${frac}` : base;
 }
 
 function parseTimestamp(text) {
@@ -456,49 +1017,152 @@ function parseTimestamp(text) {
   return NaN;
 }
 
-function getYtMaxStart() {
-  const dur = state.yt.info?.duration || 0;
-  const len = Number($('yt-duration-slider').value) || 6;
-  return Math.max(0, Number((dur - Math.min(len, dur)).toFixed(1)));
+const ytEditor = createTrimEditor({
+  mount: $('yt-trim'),
+  frame: $('yt-frame'),
+  idPrefix: 'yt',
+  field: $('yt-start-input'),
+  readout: $('yt-range-val'),
+  poster: $('yt-thumb'),
+  onChange: ({ start, len }) => {
+    state.yt.startSec = start;
+    // the text field is the source of truth for `start`; the timeline writes into it
+    if (document.activeElement !== $('yt-start-input')) $('yt-start-input').value = formatTimestamp(start);
+    setLengthUi('yt-duration-slider', 'yt-duration-val', len);
+  },
+});
+
+function setYtStart(sec, { updateInput = true, seek = true } = {}) {
+  ytEditor.setSelection(Number.isFinite(sec) ? sec : 0, Number($('yt-duration-slider').value) || 6, { seek });
+  state.yt.startSec = ytEditor.getSelection().start;
+  if (updateInput) $('yt-start-input').value = formatTimestamp(state.yt.startSec);
 }
 
-function updateYtRangeReadout() {
-  const start = state.yt.startSec;
-  const len = Number($('yt-duration-slider').value) || 6;
-  const dur = state.yt.info?.duration || 0;
-  const end = Math.min(dur || start + len, start + len);
-  $('yt-range-val').textContent = `${formatTimestamp(start)} – ${formatTimestamp(end)}`;
+// --- Player lifecycle -------------------------------------------------------
+let ytPlayer = null;
+let ytMountToken = 0;
+
+const YT_NO_PREVIEW = 'Trimming still works from the numbers — the sticker is cut at exactly these times.';
+
+function ytPlaybackUnavailable(reason) {
+  ytEditor.setAdapter(null);
+  ytEditor.setStatus(null);
+  ytEditor.setNote(`${reason} ${YT_NO_PREVIEW}`);
 }
 
-function scheduleYtEmbedUpdate(immediate = false) {
-  if (!state.yt.info?.id) return;
-  const floorStart = Math.floor(state.yt.startSec);
-  if (state.yt.embedTimer) {
-    clearTimeout(state.yt.embedTimer);
-    state.yt.embedTimer = null;
+function destroyYtPlayer() {
+  try {
+    ytPlayer?.destroy();
+  } catch {}
+  ytPlayer = null;
+  $('yt-player-slot').replaceChildren();
+}
+
+async function mountYtPlayer(info) {
+  const token = ++ytMountToken;
+  destroyYtPlayer();
+  ytEditor.setAdapter(null);
+  ytEditor.setNote(null);
+  ytEditor.setStatus('Loading player…');
+
+  let YTns = null;
+  try {
+    YTns = await loadYtApi();
+  } catch (err) {
+    console.warn('[yt] IFrame API failed to load, using plain embed', err);
   }
-  const apply = () => {
-    if (!state.yt.info?.id) return;
-    if (state.yt.lastEmbedStart === floorStart && $('yt-embed').src) return;
-    state.yt.lastEmbedStart = floorStart;
-    $('yt-embed').src = `https://www.youtube.com/embed/${encodeURIComponent(state.yt.info.id)}?start=${floorStart}`;
-  };
-  if (immediate) {
-    apply();
-  } else {
-    state.yt.embedTimer = setTimeout(apply, 450);
+  if (token !== ytMountToken) return;
+  if (!YTns || typeof YTns.Player !== 'function') {
+    mountYtEmbed(info);
+    return;
+  }
+  try {
+    mountYtApiPlayer(YTns, info, token);
+  } catch (err) {
+    console.warn('[yt] IFrame API player setup failed, using plain embed', err);
+    if (token !== ytMountToken) return;
+    destroyYtPlayer();
+    mountYtEmbed(info);
   }
 }
 
-function setYtStart(sec, { updateInput = true, immediateEmbed = false } = {}) {
-  const maxStart = getYtMaxStart();
-  const clamped = Math.max(0, Math.min(maxStart, Number.isFinite(sec) ? sec : 0));
-  state.yt.startSec = Number(clamped.toFixed(1));
-  if (updateInput) {
-    $('yt-start-input').value = formatTimestamp(state.yt.startSec);
+// API unavailable: plain embed (YouTube's own controls), timeline reloads it at ?start=
+function mountYtEmbed(info) {
+  const slot = $('yt-player-slot');
+  slot.replaceChildren();
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.id = 'yt-embed';
+    iframe.title = 'YouTube clip preview';
+    iframe.allow = 'encrypted-media; picture-in-picture';
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+    iframe.allowFullscreen = true;
+    slot.appendChild(iframe);
+    ytEditor.setStatus(null);
+    ytEditor.setAdapter(ytEmbedAdapter(iframe, info.id));
+  } catch (err) {
+    console.warn('[yt] plain embed failed too', err);
+    ytPlaybackUnavailable("The YouTube player couldn't be set up, so there's no live preview.");
   }
-  updateYtRangeReadout();
-  scheduleYtEmbedUpdate(immediateEmbed);
+}
+
+function mountYtApiPlayer(YTns, info, token) {
+  const slot = $('yt-player-slot');
+  const host = document.createElement('div');
+  host.id = 'yt-embed'; // the API swaps this for its iframe, keeping the id
+  slot.appendChild(host);
+  let adapter = null;
+  const readyTimer = setTimeout(() => {
+    if (token === ytMountToken && !adapter) ytPlaybackUnavailable("The YouTube player didn't load, so there's no live preview.");
+  }, 12000);
+  ytPlayer = new YTns.Player(host, {
+    width: '100%',
+    height: '100%',
+    videoId: info.id,
+    playerVars: {
+      playsinline: 1,
+      controls: 0,
+      modestbranding: 1,
+      rel: 0,
+      disablekb: 1,
+      fs: 0,
+      iv_load_policy: 3,
+      origin: location.origin,
+    },
+    events: {
+      onReady: () => {
+        if (token !== ytMountToken) return;
+        clearTimeout(readyTimer);
+        try {
+          adapter = ytApiAdapter(ytPlayer);
+          ytEditor.setStatus(null);
+          ytEditor.setNote(null);
+          const { start } = ytEditor.getSelection();
+          ytEditor.setAdapter(adapter);
+          if (start > 0) ytEditor.setSelection(start, undefined, { seek: true });
+        } catch (err) {
+          console.warn('[yt] player ready handling failed, using plain embed', err);
+          adapter = NO_PLAYBACK;
+          destroyYtPlayer();
+          mountYtEmbed(info);
+        }
+      },
+      onStateChange: (e) => {
+        if (token === ytMountToken) adapter?.handleState(e.data);
+      },
+      onError: (e) => {
+        if (token !== ytMountToken) return;
+        clearTimeout(readyTimer);
+        adapter = adapter || NO_PLAYBACK;
+        const embedBlocked = e.data === 101 || e.data === 150 || e.data === 153;
+        ytPlaybackUnavailable(
+          embedBlocked
+            ? "This video's owner doesn't allow playback outside YouTube, so there's no live preview."
+            : "YouTube won't play this video here, so there's no live preview.",
+        );
+      },
+    },
+  });
 }
 
 function setYtSoundMode(mode) {
@@ -525,20 +1189,19 @@ $('yt-volume-slider').addEventListener('input', () => {
 
 $('yt-duration-slider').addEventListener('input', () => {
   const val = Number($('yt-duration-slider').value) || 6;
-  $('yt-duration-val').textContent = `${val.toFixed(1)}s`;
-  setYtStart(state.yt.startSec, { updateInput: true, immediateEmbed: false });
+  ytEditor.setSelection(ytEditor.getSelection().start, val, { emit: true });
 });
 
 $('yt-start-input').addEventListener('input', () => {
   const parsed = parseTimestamp($('yt-start-input').value);
   if (Number.isFinite(parsed)) {
-    setYtStart(parsed, { updateInput: false, immediateEmbed: false });
+    setYtStart(parsed, { updateInput: false });
   }
 });
 
 $('yt-start-input').addEventListener('blur', () => {
   const parsed = parseTimestamp($('yt-start-input').value);
-  setYtStart(Number.isFinite(parsed) ? parsed : state.yt.startSec, { updateInput: true, immediateEmbed: false });
+  setYtStart(Number.isFinite(parsed) ? parsed : state.yt.startSec, { updateInput: true, seek: false });
 });
 
 $('yt-start-input').addEventListener('keydown', (e) => {
@@ -546,14 +1209,6 @@ $('yt-start-input').addEventListener('keydown', (e) => {
     e.preventDefault();
     $('yt-start-input').blur();
   }
-});
-
-$('yt-nudge-back').addEventListener('click', () => {
-  setYtStart(state.yt.startSec - 5, { updateInput: true, immediateEmbed: false });
-});
-
-$('yt-nudge-fwd').addEventListener('click', () => {
-  setYtStart(state.yt.startSec + 5, { updateInput: true, immediateEmbed: false });
 });
 
 $('yt-fetch-form').addEventListener('submit', async (e) => {
@@ -578,14 +1233,13 @@ $('yt-fetch-form').addEventListener('submit', async (e) => {
     });
     state.yt.info = info;
     state.yt.url = url;
-    state.yt.lastEmbedStart = null;
 
     $('yt-thumb').src = info.thumbnail || '';
     $('yt-title').textContent = info.title || 'Untitled video';
     $('yt-uploader').textContent = info.uploader || 'YouTube';
-    $('yt-duration').textContent = formatTimestamp(info.duration);
+    $('yt-duration').textContent = formatClock(info.duration, 0);
 
-    const maxLen = Math.min(6, Math.max(1, Math.floor(info.duration * 2) / 2 || 6));
+    const maxLen = Math.min(6, Math.max(1, floorTenth(info.duration) || 6));
     const durSlider = $('yt-duration-slider');
     durSlider.max = String(maxLen);
     if (Number(durSlider.value) > maxLen) durSlider.value = String(maxLen);
@@ -595,26 +1249,44 @@ $('yt-fetch-form').addEventListener('submit', async (e) => {
     show($('result-card'), false);
     updateFitHints();
     paintAllRanges();
-    setYtStart(0, { updateInput: true, immediateEmbed: true });
+    ytEditor.setDuration(info.duration);
+    setYtStart(0, { updateInput: true, seek: false });
     setYtSoundMode('video');
+    mountYtPlayer(info).catch((err) => {
+      console.warn('[yt] player mount failed, using plain embed', err);
+      mountYtEmbed(info);
+    });
   } catch (err) {
     show($('yt-loaded'), false);
     state.yt.info = null;
+    ytMountToken++;
+    destroyYtPlayer();
     updateFitHints();
-    setError($('yt-error'), friendlyError(err));
+    setError($('yt-error'), ytFetchError(err));
   } finally {
     btn.textContent = 'Fetch';
     renderYouTubeAvailability();
   }
 });
 
+function ytFetchError(err) {
+  if (err.code === 'video_unavailable') {
+    return "YouTube won't serve this video to our server — it may be region-locked, age-restricted or a live stream.";
+  }
+  if (err.code === 'live_not_supported') {
+    return "That's a live stream — YouTube won't hand us a fixed clip of it. Try again once the stream has ended.";
+  }
+  return friendlyError(err);
+}
+
 $('yt-build-btn').addEventListener('click', async () => {
   if (!state.yt.info) return;
   setError($('yt-build-error'), '');
+  ytEditor.pause();
 
   // Normalize start input in case user clicked Build without blurring
   const parsedStart = parseTimestamp($('yt-start-input').value);
-  setYtStart(Number.isFinite(parsedStart) ? parsedStart : state.yt.startSec, { updateInput: true, immediateEmbed: false });
+  setYtStart(Number.isFinite(parsedStart) ? parsedStart : state.yt.startSec, { updateInput: true, seek: false });
 
   if (state.yt.soundMode === 'upload' && !state.yt.audioFile) {
     setError($('yt-build-error'), 'Choose an audio file, or switch to "From video" / "No sound".');

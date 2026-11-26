@@ -166,3 +166,87 @@ Server log lines:
 sticker: 512x512 fps=15 q=63 bytes=505708
 sticker: 512x512 fps=1 q=90 bytes=23292
 ```
+
+## Trim editor (TASK-TRIM)
+
+### A. Overflow — reproduced, fixed, measured
+
+**Before** (old `.yt-preview-grid`, headless Chromium, `jNQXAC9IVRw` loaded): at ≥720 px the two-up grid
+put the 16:9 `.yt-embed-wrap` in a `1fr` column, but the row was stretched to the thumbnail card's height and
+`aspect-ratio` derived the width *from that height* → `div.yt-embed-wrap` ended **75.6 px past the card's
+right edge** at both 768 and 1280 px (embed 322×180 drawn at x=391..713 in a card ending at 638). ≤400 px
+collapsed to one column, which is why phones looked fine.
+
+**After**: one full-width `.player-frame` (`width:100%; max-width:100%; aspect-ratio:16/9; overflow:hidden;
+contain:layout paint`), every child (`iframe`/`video`/poster/overlay) `position:absolute; inset:0;
+width/height:100%`, meta line underneath. Timeline handles hang off the band but live inside `.tl`'s
+horizontal padding, so they can't leave the card either.
+
+Assertion: for every descendant of `#editor-card` with a box, `rect.right <= card.rect.right + 1`, and
+`document.body.scrollWidth <= innerWidth`. Measured three states per width — YouTube with band at 0:00,
+YouTube with the band pinned to the far right end (worst case for the right handle), and the Upload tab with a
+12 s clip loaded and its band at the end:
+
+| width | state | card.right | max(desc.right − card.right) | body.scrollWidth / innerWidth | 16:9 player box | result |
+|---|---|---|---|---|---|---|
+| 360 | YT, band at start | 348 | −1 | 360 / 360 | 28..332 (304×170) | PASS |
+| 360 | YT, band at end | 348 | −1 | 360 / 360 | 28..332 (304×170) | PASS |
+| 360 | Upload, band at end | 348 | −1 | 360 / 360 | — | PASS |
+| 390 | YT, band at start | 378 | −1 | 390 / 390 | 28..362 (334×187) | PASS |
+| 390 | YT, band at end | 378 | −1 | 390 / 390 | 28..362 (334×187) | PASS |
+| 390 | Upload, band at end | 378 | −1 | 390 / 390 | — | PASS |
+| 768 | YT, band at start | 638 | −25 | 768 / 768 | 156..612 (456×256) | PASS |
+| 768 | YT, band at end | 638 | −25 | 768 / 768 | 156..612 (456×256) | PASS |
+| 768 | Upload, band at end | 638 | −25 | 768 / 768 | — | PASS |
+| 1280 | YT, band at start | 894 | −25 | 1280 / 1280 | 412..868 (456×256) | PASS |
+| 1280 | YT, band at end | 894 | −25 | 1280 / 1280 | 412..868 (456×256) | PASS |
+| 1280 | Upload, band at end | 894 | −25 | 1280 / 1280 | — | PASS |
+
+(−1 at phone widths is the sticky `.action-bar`, which deliberately bleeds to the card's inner border.)
+`Network.setBlockedURLs` for `*youtube.com/embed*` / `*ytimg.com*` was set as instructed, but it does not
+reach the out-of-process YouTube iframe in this Chromium (155) — the real embed loaded and the tab did **not**
+crash, so the boxes above are with the real player in place. Thumbnails were blocked.
+
+### B/C. One `createTrimEditor()` + three adapters (`public/app.js`)
+
+- Markup lives once in `<template id="trim-editor-tpl">`; each source clones it. Adapters:
+  `videoAdapter(<video>)` (upload), `ytApiAdapter(YT.Player)` (IFrame API, `playsinline:1, controls:0,
+  modestbranding:1, rel:0, disablekb:1, origin`), `ytEmbedAdapter(iframe)` (API didn't load within 8 s →
+  plain embed with YouTube's own controls, timeline reloads `?start=`, Preview reloads `?start&end&autoplay`).
+- IFrame API is injected lazily the first time the YouTube tab is opened.
+- `#yt-start-input` still holds the start (timeline writes into it, typing moves the band); band length writes
+  `#yt-duration-slider` / `#duration-slider` (step now 0.1). Upload start is written to the (now hidden)
+  `#start-slider`. Job payloads unchanged.
+
+### Headless drive (Chromium 155, 390 px)
+
+- **Fetch `jNQXAC9IVRw`, drag the band body from its centre +3 s, press Build** → readouts `0:03.0 → 0:09.0`,
+  input `0:03`; captured job payload `source=youtube, youtubeUrl=…jNQXAC9IVRw, start=3, duration=6,
+  mute=false, audioVolume=1, fit=fit`; job completed (`499 KB`, "From YouTube: Me at the zoo").
+- **Live seek on the real `YT.Player`** (instance methods spied): the 0→3 s drag produced
+  `mute() pauseVideo() seekTo(0.0) pauseVideo() seekTo(0.3) … seekTo(2.4) pauseVideo() seekTo(3.0) pauseVideo()`
+  (throttled to ~120 ms, last seek lands on the final value). Preview: `seekTo(3.0) unMute() playVideo()`.
+  Shift+← → `seekTo(2.0)`, input `0:02`. Typing `0:07.5` → `seekTo(7.5)`, band `0:07.5 → 0:13.5`.
+  Left-handle drag +2.8 s from start 2.5 → `start=5.3, duration=3.2` in the payload.
+  Caveat: headless Chromium can't decode YouTube's stream, so the *picture* at the seeked frame was only
+  verifiable as the player sitting paused at 0:03 with that moment's caption showing — check on a phone.
+- **Upload (12 s testsrc clip)**: band drag +4 s → `video.currentTime=4, paused`, start `4`; right handle −2 s →
+  `currentTime=8.4` (end frame shown), length `4.4`; →→→ + Shift+→ → start `5.3`; click track @1 s → playhead 1,
+  band unchanged; *Set start here* → start `1`; *Preview selection* sampled every 0.5 s:
+  `1.45 1.95 2.45 2.95 3.45 3.95 4.46 4.96 1.03 1.53 … 5.04 1.09` (loops inside 1.0–5.4); toggle off → paused.
+  Payload after 3× Shift+→: `start=3, duration=6`.
+
+### D. Failure states (verified)
+
+- `jkYTx3IeSfc` → `/api/yt/info` `422 video_unavailable` → UI: "YouTube won't serve this video to our server —
+  it may be region-locked, age-restricted or a live stream."
+- Player `onError(150)` (simulated) → poster + meta + timeline stay; note: "This video's owner doesn't allow
+  playback outside YouTube, so there's no live preview. Trimming still works from the numbers — the sticker is
+  cut at exactly these times."; play/preview hidden/disabled, nudges/keys/typing still drive the numbers.
+- IFrame API blocked → plain embed `…/embed/jNQXAC9IVRw?playsinline=1&rel=0&start=0`; typing `0:07.4` →
+  `start=7`; Preview → `start=7&end=14&autoplay=1`.
+
+### Smoke
+
+- `bash scripts/smoke.sh` — PASS (sticker 175,168 B, audio 7.01 s, EXIF sha256 verified)
+- `bash scripts/smoke-youtube.sh` — PASS (sticker 510,888 B, audio 10.01 s, EXIF sha256 verified)
