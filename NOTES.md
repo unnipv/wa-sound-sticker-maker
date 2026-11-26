@@ -250,3 +250,86 @@ crash, so the boxes above are with the real player in place. Thumbnails were blo
 
 - `bash scripts/smoke.sh` — PASS (sticker 175,168 B, audio 7.01 s, EXIF sha256 verified)
 - `bash scripts/smoke-youtube.sh` — PASS (sticker 510,888 B, audio 10.01 s, EXIF sha256 verified)
+
+## Audio length matches selection (TASK-AUDIO)
+
+Updated `makeAudio(src, start, outDir, volume, maxSeconds)` in `lib/sticker.js` so `-t` is capped at `min(maxSeconds, MAX_AUDIO_SEC)` instead of always cutting `MAX_AUDIO_SEC` (10 s). `buildSticker()` computes `audioLimit = Math.min(MAX_AUDIO_SEC, animSec)` and passes it for both embedded media audio and separately uploaded audio files. Updated UI result metadata to show `<anim>s sticker · <audio>s sound` (one decimal) and added `"Sound is cut to the same window."` under `Animation length`.
+
+### `bash scripts/smoke.sh` (passed)
+
+```text
+[smoke] Generating synthetic 8s video + audio clip with ffmpeg...
+[smoke] Starting server on http://127.0.0.1:18080...
+[smoke] POST http://127.0.0.1:18080/api/jobs...
+[smoke] Created job: 6204e2ccd85225d558
+[smoke] Results:
+  sticker.webp : 175168 bytes (limit: 512000)
+  audio.ogg    : 58767 bytes
+  audio dur    : 6.013000 s (reported: 6 s, limit: 10 s)
+  EXIF sha256  : verified (l2mj2abskPL1ZdXN...)
+[smoke] PASS
+```
+
+### `bash scripts/smoke-youtube.sh` (passed)
+
+```text
+[smoke-yt] Starting server on http://127.0.0.1:18081...
+[smoke-yt] POST http://127.0.0.1:18081/api/yt/info (https://www.youtube.com/watch?v=jNQXAC9IVRw)...
+[smoke-yt] Info: jNQXAC9IVRw | Me at the zoo | 19s | jawed
+[smoke-yt] POST http://127.0.0.1:18081/api/jobs (source=youtube, start=2, duration=6)...
+[smoke-yt] Created job: 40ebde975e310fd6d2
+[smoke-yt] Results:
+  videoTitle   : Me at the zoo
+  sticker.webp : 510888 bytes (limit: 512000)
+  audio.ogg    : 48860 bytes
+  audio dur    : 6.013000 s (reported: 6 s, limit: 10 s)
+  EXIF sha256  : verified (yn297zhCXTsFhRhj...)
+[smoke-yt] PASS
+```
+
+### Scratch-port verification (`PORT=18097`, `RELAY_ENABLED=false`)
+
+Summary of the three measured `audio.ogg` durations:
+
+| Case | Selection | `ffprobe` audio duration | Job `audioSeconds` / `animSeconds` | Sticker WebP frames / duration |
+|---|---|---|---|---|
+| YouTube `aqz-KE-bpKQ` (`start=600`, `duration=2`) | 2 s | `2.013000 s` (17,164 B) | `2` / `2` | `16` frames @ 8 fps (`2000 ms`, 510,574 B) |
+| YouTube `aqz-KE-bpKQ` (`start=600`, `duration=6`) | 6 s | `6.013000 s` (49,718 B) | `6` / `6` | `24` frames @ 4 fps (`6000 ms`, 400,890 B) |
+| Uploaded 8 s clip (`start=1`, `duration=2`) | 2 s | `2.013000 s` (18,685 B) | `2` / `2` | `30` frames @ 15 fps (`1999 ms`, 60,552 B) |
+
+Raw `ffprobe` & job output:
+
+```text
+--- yt_2s ---
+JOB_JSON: {"ok":true,"id":"6de55045b53b838f08","status":"done","stage":null,"source":"youtube","fit":"fit","createdAt":1795709587271,"sourceUrl":"https://www.youtube.com/watch?v=aqz-KE-bpKQ","videoTitle":null,"sectionStart":600,"sectionLength":2,"sizes":{"stickerBytes":510574,"audioBytes":17164},"audioSeconds":2,"animSeconds":2,"hasAudio":true,"fps":8,"quality":57,"thumb":"/api/jobs/6de55045b53b838f08/sticker.webp","stickerUrl":"/api/jobs/6de55045b53b838f08/sticker.webp","audioUrl":"/api/jobs/6de55045b53b838f08/audio.ogg"}
+FFPROBE_AUDIO:
+codec_name=opus
+sample_rate=48000
+channels=1
+duration=2.013000
+duration=2.013000
+size=17164
+WEBP_INFO: frames=16 totalMs=2000 bytes=510574
+
+--- yt_6s ---
+JOB_JSON: {"ok":true,"id":"5b506b9aec1d4f3d4c","status":"done","stage":null,"source":"youtube","fit":"fit","createdAt":1795709613108,"sourceUrl":"https://www.youtube.com/watch?v=aqz-KE-bpKQ","videoTitle":null,"sectionStart":600,"sectionLength":6,"sizes":{"stickerBytes":400890,"audioBytes":49718},"audioSeconds":6,"animSeconds":6,"hasAudio":true,"fps":4,"quality":15,"thumb":"/api/jobs/5b506b9aec1d4f3d4c/sticker.webp","stickerUrl":"/api/jobs/5b506b9aec1d4f3d4c/sticker.webp","audioUrl":"/api/jobs/5b506b9aec1d4f3d4c/audio.ogg"}
+FFPROBE_AUDIO:
+codec_name=opus
+sample_rate=48000
+channels=1
+duration=6.013000
+duration=6.013000
+size=49718
+WEBP_INFO: frames=24 totalMs=6000 bytes=400890
+
+--- upload_8s_pick_2s ---
+JOB_JSON: {"ok":true,"id":"2e0bcc7755ed2b2beb","status":"done","stage":null,"source":"upload","fit":"fit","createdAt":1795709666268,"sizes":{"stickerBytes":60552,"audioBytes":18685},"audioSeconds":2,"animSeconds":2,"hasAudio":true,"fps":15,"quality":82,"thumb":"/api/jobs/2e0bcc7755ed2b2beb/sticker.webp","stickerUrl":"/api/jobs/2e0bcc7755ed2b2beb/sticker.webp","audioUrl":"/api/jobs/2e0bcc7755ed2b2beb/audio.ogg"}
+FFPROBE_AUDIO:
+codec_name=opus
+sample_rate=48000
+channels=1
+duration=2.013000
+duration=2.013000
+size=18685
+WEBP_INFO: frames=30 totalMs=1999 bytes=60552
+```

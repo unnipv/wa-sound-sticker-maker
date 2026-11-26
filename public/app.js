@@ -1385,13 +1385,17 @@ function renderResult(job) {
   show($('meta-crop'), job.fit === 'fill');
 
   const audioEl = $('sticker-audio');
+  const animLabel = Number.isFinite(Number(job.animSeconds))
+    ? `${Number(job.animSeconds).toFixed(1)}s sticker`
+    : '';
   if (job.hasAudio && job.audioUrl) {
     audioEl.src = `${job.audioUrl}${bust}`;
-    $('meta-audio').textContent = `${job.audioSeconds}s`;
+    const soundLabel = `${Number(job.audioSeconds ?? 0).toFixed(1)}s sound`;
+    $('meta-audio').textContent = animLabel ? `${animLabel} · ${soundLabel}` : soundLabel;
     show($('play-audio-btn'), true);
   } else {
     audioEl.removeAttribute('src');
-    $('meta-audio').textContent = 'Silent';
+    $('meta-audio').textContent = animLabel ? `${animLabel} · Silent` : 'Silent';
     show($('play-audio-btn'), false);
   }
   audioEl.pause();
